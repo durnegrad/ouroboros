@@ -1513,6 +1513,15 @@ async def collect_evolution_metrics(repo_dir: str, data_dir: str | None = None) 
         else:
             missing_tags.append((tag, date))
 
+    # Cold-scan guard (D): a fresh cache must not spawn git subprocesses for
+    # every historical tag on one UI visit — weak CPUs stall for minutes.
+    # Newest tags carry the most relevant trend; older ones fill in on
+    # subsequent visits as the cache warms.
+    from ouroboros.runtime_limits import get_evolution_metrics_max_cold_tags
+    max_cold = get_evolution_metrics_max_cold_tags()
+    if len(missing_tags) > max_cold:
+        missing_tags = missing_tags[-max_cold:]
+
     loop = asyncio.get_running_loop()
     semaphore = asyncio.Semaphore(4)
 

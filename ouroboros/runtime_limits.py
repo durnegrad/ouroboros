@@ -195,6 +195,12 @@ def get_ui_translation_timeout_sec() -> float:
     return _clamped_number_setting("OUROBOROS_UI_TRANSLATION_TIMEOUT_SEC", low=10.0, high=600.0)
 
 
+def get_evolution_metrics_max_cold_tags() -> int:
+    """Upper bound on tags scanned on a cold Evolution-metrics call (cache empty or partial).
+    A first Dashboard → Evolution visit must not spawn hundreds of git subprocesses on a weak CPU."""
+    return _clamped_number_setting("OUROBOROS_EVOLUTION_METRICS_MAX_COLD_TAGS", low=1, high=500, cast=int)
+
+
 def get_websearch_timeout_sec() -> float:
     """Per-attempt transport timeout for provider-backed web_search calls."""
     return _clamped_number_setting("OUROBOROS_WEBSEARCH_TIMEOUT_SEC", low=30.0, high=3600.0)
