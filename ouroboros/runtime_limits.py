@@ -201,6 +201,12 @@ def get_evolution_metrics_max_cold_tags() -> int:
     return _clamped_number_setting("OUROBOROS_EVOLUTION_METRICS_MAX_COLD_TAGS", low=1, high=500, cast=int)
 
 
+def get_review_inter_slot_delay_sec() -> float:
+    """Seconds between starting review slots on the same route.
+    Prevents burst-throttling a shared free gate (3×141k token requests in one second → 429)."""
+    return _clamped_number_setting("OUROBOROS_REVIEW_INTER_SLOT_DELAY_SEC", low=0.0, high=30.0, cast=float)
+
+
 def get_websearch_timeout_sec() -> float:
     """Per-attempt transport timeout for provider-backed web_search calls."""
     return _clamped_number_setting("OUROBOROS_WEBSEARCH_TIMEOUT_SEC", low=30.0, high=3600.0)

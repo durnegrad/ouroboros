@@ -1461,6 +1461,13 @@ def _run_custodied_review_slots(
 
     for slot in slots:
         start(slot)
+        # Pace slot starts on the same route to avoid burst-throttling
+        # a shared provider (the free-gate 429/Arrearage problem).
+        if len(slots) > 1:
+            from ouroboros.runtime_limits import get_review_inter_slot_delay_sec
+            delay = get_review_inter_slot_delay_sec()
+            if delay > 0:
+                time.sleep(delay)
 
     actors: List[Any] = list(immediate_actors.values())
     pending = {

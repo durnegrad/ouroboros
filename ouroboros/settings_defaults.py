@@ -153,6 +153,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # One translation-generator batch call (ui_translation.py): slot wait and provider call together.
     "OUROBOROS_UI_TRANSLATION_TIMEOUT_SEC": 120,
     "OUROBOROS_EVOLUTION_METRICS_MAX_COLD_TAGS": 50,
+    "OUROBOROS_REVIEW_INTER_SLOT_DELAY_SEC": 2.0,
     "OUROBOROS_PROJECT_NAMING_TIMEOUT_SEC": 60,
     "OUROBOROS_PROJECT_NAMING_ASYNC_TIMEOUT_SEC": 8,
     # Skill lifecycle lane deadline (wedged-job loud-failure bound).
