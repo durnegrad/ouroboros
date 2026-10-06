@@ -325,9 +325,10 @@ def test_settings_extraction_size_bounds_have_meaningful_headroom():
         )
         for module in (config, *_LEAVES)
     }
-    assert counts["ouroboros.config"] <= 1000
-    assert all(count <= 1000 for count in counts.values())
+    assert counts["ouroboros.config"] <= 1002  # 1000 -> 1002: two re-exported getters (v7.6.2, v7.6.4)
+    assert all(count <= 1002 for count in counts.values())
     # 500 -> 520: the Z.ai direct provider adds its key and plan rows to the leaf (PR #1207).
     # 520 -> 521: the desktop keep-running consent key's default row (PR #1404; its disk-authored entry adds none).
-    assert counts["ouroboros.settings_defaults"] <= 521
+    # 521 -> 523: the evolution-metrics cold-scan cap and the review inter-slot pacing delay (v7.6.2, v7.6.4).
+    assert counts["ouroboros.settings_defaults"] <= 523
     assert (PACKAGE / "config.py").is_file()

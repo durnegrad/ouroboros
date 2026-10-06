@@ -150,6 +150,8 @@ from ouroboros.runtime_limits import (
     get_task_idle_timeout_sec,  # noqa: F401
     get_vision_caption_timeout_sec,  # noqa: F401
     get_update_letter_timeout_sec,  # noqa: F401
+    get_evolution_metrics_max_cold_tags,  # noqa: F401
+    get_review_inter_slot_delay_sec,  # noqa: F401
     get_ui_translation_timeout_sec,  # noqa: F401
     get_websearch_timeout_sec,  # noqa: F401
 )
