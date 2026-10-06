@@ -31,7 +31,7 @@ CONSTRAINT = {"mode": "normal"}
 REFUSALS = {
     "update": "🔒 An update is using the repository. Try this message again when it finishes.",
     "budget": "🚫 Budget exhausted. Task rejected. Please increase TOTAL_BUDGET in settings.",
-    "ledger": "⚠️ Cost accounting is unavailable. Task was not dispatched; retry after ledger recovery.",
+    "ledger": "⚠️ Cost accounting is unavailable. The ledger could not be read; check whether the task was dispatched via task status.",
 }
 
 

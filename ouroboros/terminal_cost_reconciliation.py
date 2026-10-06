@@ -132,7 +132,7 @@ def reconcile_abandoned_usage(drive_root: pathlib.Path) -> None:
     from supervisor.queue import task_has_live_ownership
 
     root = pathlib.Path(drive_root).resolve()
-    rows = usage.read_usage_records(root, final_only=True)
+    rows, _, _, _ = usage._memoized_final_rows(root)
     tasks, refresh = {}, set()
     gateway, gateway_unavailable = None, False
 

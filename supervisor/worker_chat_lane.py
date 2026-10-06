@@ -174,7 +174,7 @@ def _handle_chat_direct_locked(
     try:
         remaining = budget_remaining(load_state(), strict=True)
     except Exception:
-        _pool().send_with_budget(chat_id, "⚠️ Cost accounting is unavailable. Task was not dispatched; retry after ledger recovery.", **failure_meta, role="system", system_type="task_admission_notice")
+        _pool().send_with_budget(chat_id, "⚠️ Cost accounting is unavailable. The ledger could not be read; check whether the task was dispatched via task status.", **failure_meta, role="system", system_type="task_admission_notice")
         return
     if remaining <= 0:
         try:
