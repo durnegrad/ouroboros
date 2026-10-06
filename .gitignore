@@ -3,6 +3,8 @@
 .env.*
 *.key
 *.pem
+*.gitcredentials
+.gitcredentials
 
 # IDE
 .cursor/

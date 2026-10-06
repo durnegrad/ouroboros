@@ -98,7 +98,14 @@ def task_state_dir(drive_root: pathlib.Path, task_id: str) -> pathlib.Path:
 
 
 def task_artifacts_dir(drive_root: pathlib.Path, task_id: str, *, create: bool = True) -> pathlib.Path:
-    path = pathlib.Path(drive_root) / ARTIFACTS_DIR / validate_task_id(task_id)
+    root = pathlib.Path(drive_root)
+    # Idempotent: if the caller already passed the artifact dir itself,
+    # return it as-is instead of nesting another artifacts/<id> inside.
+    if root.name == validate_task_id(task_id) and root.parent.name == pathlib.Path(ARTIFACTS_DIR).name:
+        if create:
+            root.mkdir(parents=True, exist_ok=True)
+        return root
+    path = root / ARTIFACTS_DIR / validate_task_id(task_id)
     if create:
         path.mkdir(parents=True, exist_ok=True)
     return path

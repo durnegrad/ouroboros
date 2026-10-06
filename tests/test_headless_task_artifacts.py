@@ -50,6 +50,21 @@ def _assert_file_response(response, content: bytes) -> None:
         assert response.json()["reason_code"] == "artifact_unavailable"
 
 
+def test_task_artifacts_dir_idempotent_when_already_artifact_dir(tmp_path):
+    """If the caller already passes the resolved artifact dir as drive_root,
+    task_artifacts_dir returns it as-is instead of nesting another
+    task_results/artifacts/<id>/ inside. This is the Windows path-duplication
+    guard from review_source_closure_unavailable."""
+    artifact_dir = task_artifacts_dir(tmp_path, "task-id")
+    assert artifact_dir == tmp_path / "task_results" / "artifacts" / "task-id"
+    # Nested call: the artifact dir itself is the root — no duplication.
+    nested = task_artifacts_dir(artifact_dir, "task-id", create=False)
+    assert nested == artifact_dir
+    # Create=True on the already-resolved dir still works.
+    created = task_artifacts_dir(artifact_dir, "task-id", create=True)
+    assert created == artifact_dir
+
+
 def test_copy_child_result_cannot_overwrite_finalized_accounting(tmp_path):
     """F2: once the root's terminal checkpoint has finalized accounting
     (task_cost_finalized rides the same write as post_task_synthesis), a late
