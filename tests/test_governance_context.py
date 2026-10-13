@@ -181,6 +181,51 @@ def test_design_is_inline_only_when_a_touched_path_is_under_web(repo):
     assert "The design system for web/ work." not in core.selected_inline
 
 
+def test_release_carriers_select_no_chapter_and_no_design(repo):
+    """A version bump rewrites carriers inside their declared spans, so their
+    basenames carry no change class and must not drag chapters or DESIGN
+    (owner decision 2026-10-13)."""
+    context = _context(repo, touched_paths=["README.md", "web/package.json", "uv.lock"])
+
+    assert _paths(context, "inline", tier=2) == [REVIEW_PROTOCOL_CHAPTER]
+    assert "docs/DESIGN.md" in _paths(context, "navigation", tier=2)
+
+
+def test_web_tests_do_not_bring_the_design_book(repo):
+    context = _context(repo, touched_paths=["web/tests/chat.test.js"])
+
+    assert "docs/DESIGN.md" in _paths(context, "navigation", tier=2)
+
+
+def test_design_is_delivered_as_sections_when_one_mentions_the_change(repo):
+    (repo / "docs" / "DESIGN.md").write_text(
+        "# Design\n\nThe preamble.\n\n## Chat surfaces\n\n"
+        "Chat rules mention web/modules/chat.js.\n\n## Colors\n\nPalette rules, unrelated here.\n",
+        encoding="utf-8", newline="\n")
+    context = _context(repo, touched_paths=["web/modules/chat.js"])
+
+    assert _paths(context, "inline", tier=2) == [
+        REVIEW_PROTOCOL_CHAPTER, "docs/DESIGN.md#intro", "docs/DESIGN.md#Chat surfaces",
+        "docs/development/06-widgets.md"]
+    assert "Chat rules mention web/modules/chat.js." in context.selected_inline
+    assert "Palette rules, unrelated here." not in context.selected_inline
+    assert "docs/DESIGN.md#Colors" in _paths(context, "navigation", tier=2)
+    # Sectioned delivery is not a whole document: no duplicate-suppression copy.
+    assert "docs/DESIGN.md" not in context.inline_whole_documents
+
+
+def test_design_is_inlined_whole_when_no_section_mentions_the_change(repo):
+    (repo / "docs" / "DESIGN.md").write_text(
+        "# Design\n\nThe preamble.\n\n## Chat surfaces\n\nChat rules.\n\n## Colors\n\nPalette rules.\n",
+        encoding="utf-8", newline="\n")
+    context = _context(repo, touched_paths=["web/modules/chat.js"])
+
+    assert "docs/DESIGN.md" in _paths(context, "inline", tier=2)
+    assert "Palette rules." in context.selected_inline
+    assert context.inline_whole_documents["docs/DESIGN.md"] == \
+        (repo / "docs" / "DESIGN.md").read_bytes().decode("utf-8")
+
+
 def test_development_chapters_are_selected_by_exact_file_name(repo):
     context = _context(repo, touched_paths=["ouroboros/project_dialogue.py"])
 

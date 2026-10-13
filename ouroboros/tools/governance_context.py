@@ -2,15 +2,23 @@
 
 Owner decision (2026-09-17, batch 2 question 1 = A): every review surface —
 triad, scope, advisory, deep self-review — asks this module which rules it must
-carry inline and which it reaches through a navigation map. Three tiers:
+carry inline and which it reaches through a navigation map. Owner decision
+(2026-10-13): release carriers no longer select chapters, the DESIGN trigger
+is a visual web surface rather than any ``web/`` path, and DESIGN itself is
+delivered in sections. Three tiers:
 
 1. **Rules, always inline.** The surface's applicable ``docs/CHECKLISTS.md``
    section (supplied by the caller, which owns its own section name),
    ``BIBLE.md`` whole and ``docs/CHECKLISTS_ARCHIVE.md`` whole. This tier is
    byte-stable across commits, so the caller puts it in its cache-marked prefix.
 2. **Rules by change class, within a budget share.** ``docs/DESIGN.md`` when the
-   change touches ``web/``; the review-and-commit protocol chapter always; and
-   every DEVELOPMENT chapter whose text mentions a touched file NAME. Bounded by
+   change touches a VISUAL surface of ``web/`` (not tests, vendor code or
+   package metadata), delivered as its preamble plus the sections that mention
+   a touched file NAME — or whole when no section mentions one, so a visual
+   change never loses the design rules it is judged by; the review-and-commit
+   protocol chapter always; and every DEVELOPMENT chapter whose text mentions a
+   touched file NAME. Release carriers are excluded from chapter matching: a
+   version bump's basenames carry no change class. Bounded by
    :data:`~ouroboros.runtime_limits.REVIEW_GOVERNANCE_INLINE_SHARE` of the
    reviewer's usable window, largest-relevance-first.
 3. **Map, never whole.** ``docs/ARCHITECTURE.md`` arrives as book navigation for
@@ -48,8 +56,17 @@ DEVELOPMENT_BOOK_ID = "development"
 ARCHITECTURE_BOOK_ID = "architecture"
 # Always relevant: it is the protocol the reviewer is executing right now.
 REVIEW_PROTOCOL_CHAPTER = "docs/development/05-review-and-commit-protocol.md"
-# The one change class that decides a whole document: DESIGN governs web/ work.
-DESIGN_CHANGE_CLASS_PREFIX = "web/"
+# The one change class that decides DESIGN: a VISUAL surface in the web/ tree.
+# The prefix alone would drag the design book into a change that merely touched
+# a web/ test or a version carrier, so the trigger lists the visual roots.
+DESIGN_VISUAL_ROOTS = ("web/modules/", "web/providers/")
+DESIGN_VISUAL_FILE_EXTS = (".css", ".html", ".js")
+DESIGN_VISUAL_TOP_LEVEL_FILES = frozenset({
+    "web/app.js", "web/index.html", "web/onboarding_template.html", "web/theme.js",
+})
+# Non-visual branches of web/: tests assert behavior, packages/locks are
+# metadata, vendored code is excluded from first-party checks.
+DESIGN_NON_VISUAL_PREFIXES = ("web/tests/", "web/vendor/", "web/node_modules/")
 
 PACKET_DELIVERY = "packet"
 RETRIEVING_DELIVERY = "retrieving"
@@ -94,6 +111,63 @@ def _touched_names(touched_paths: Optional[Iterable[Any]]) -> tuple[tuple[str, .
         base = rel.rsplit("/", 1)[-1]
         groups.append((rel,) if base == rel else (rel, base))
     return tuple(groups)
+
+
+def _is_release_carrier(path: str) -> bool:
+    """True when a path's diff bytes are version spans (release_sync SSOT).
+
+    A release bump rewrites these files inside their declared spans, so their
+    names carry no change class: matching chapters by a carrier's basename
+    selected 100+ KB of unrelated rules for what is a version edit."""
+    from ouroboros.tools.release_sync import CARRIER_SPAN_PATHS
+
+    return str(path or "").replace("\\", "/") in CARRIER_SPAN_PATHS
+
+
+def _is_visual_web_path(path: str) -> bool:
+    """True when a touched path's change can alter visual/interaction semantics.
+
+    ``web/modules/`` and ``web/providers/`` are visual by construction; a
+    top-level ``web/`` file is visual when its extension carries styling,
+    markup or script; tests, vendor code and package metadata never are."""
+    if path in DESIGN_VISUAL_TOP_LEVEL_FILES:
+        return True
+    if path.startswith(DESIGN_NON_VISUAL_PREFIXES):
+        return False
+    if path.startswith(DESIGN_VISUAL_ROOTS):
+        return True
+    top = path[len("web/"):] if path.startswith("web/") else ""
+    if top and "/" not in top:
+        return top.endswith(DESIGN_VISUAL_FILE_EXTS)
+    return False
+
+
+def _design_sections(text: str) -> tuple[tuple[str, str], ...]:
+    """``(title, body)`` for DESIGN's preamble and each ``##`` section.
+
+    The preamble carries an empty title. Bodies are line-exact slices of the
+    source text, so a section's bytes are the bytes a reviewer would read on
+    disk; ``##``-with-space is the only split, so deeper headings stay inside
+    their parent section.
+    """
+    parts: list[tuple[str, str]] = []
+    head: list[str] = []
+    current: list[str] = []
+    title = ""
+    for line in str(text or "").split("\n"):
+        if line.startswith("## "):
+            if current or head:
+                parts.append((title, "\n".join(head + current)))
+            title = line[3:].strip()
+            current = [line]
+            head = []
+        elif current:
+            current.append(line)
+        else:
+            head.append(line)
+    if current or head:
+        parts.append((title, "\n".join(head + current)))
+    return tuple(parts)
 
 
 def _mentions(text: str, groups: Iterable[tuple[str, ...]]) -> tuple[int, int]:
@@ -205,7 +279,10 @@ def governance_context(
     from ouroboros.tools.review_helpers import load_governance_doc
 
     root = Path(repo_dir)
-    names = _touched_names(touched_paths)
+    # Release carriers are version spans, not a change class: their basenames
+    # must not select chapters (owner decision 2026-10-13).
+    names = _touched_names(
+        path for path in (touched_paths or ()) if not _is_release_carrier(path))
     carried = _carried_reasons(already_inline)
     touched = {_normalize(path) for path in (touched_paths or ())}
     rows: list[dict] = []
@@ -271,18 +348,36 @@ def governance_context(
             rows.append(_row(path, 2, "navigation", len(chapter.text),
                              "no touched file mentioned"))
 
-    design_touched = any(path.startswith(DESIGN_CHANGE_CLASS_PREFIX) for path in touched)
+    chapter_text = {chapter.source_path: chapter.text for chapter in dev_chapters}
+    design_touched = any(
+        _is_visual_web_path(path) for path in touched if not _is_release_carrier(path))
     design_text = ""
     if design_touched:
         design_text = load_governance_doc(root, DESIGN_PATH, on_missing="explicit")
-        candidates.append(((1, 0, DESIGN_PATH), DESIGN_PATH, DESIGN_PATH,
-                           f"a touched path is under {DESIGN_CHANGE_CLASS_PREFIX}"))
+        sections = _design_sections(design_text)
+        if not any(title and _mentions(body, names)[0] for title, body in sections):
+            candidates.append(((1, 0, DESIGN_PATH), DESIGN_PATH, DESIGN_PATH,
+                               "a visual web surface is touched and no design section "
+                               "mentions a touched file, so the design system is inlined whole"))
+            chapter_text[DESIGN_PATH] = design_text
+        else:
+            for title, body in sections:
+                path = f"{DESIGN_PATH}#{title or 'intro'}"
+                chapter_text[path] = body
+                if not title:
+                    candidates.append(((1, 0, path), path, path,
+                                       "the design system's preamble"))
+                elif _mentions(body, names)[0]:
+                    candidates.append(((1, 1, path), path, path,
+                                       "a design section that mentions a touched file"))
+                else:
+                    rows.append(_row(path, 2, "navigation", len(body),
+                                     "design section not mentioned by this change"))
     else:
         rows.append(_row(DESIGN_PATH, 2, "navigation", 0,
-                         f"no touched path under {DESIGN_CHANGE_CLASS_PREFIX}"))
+                         "no touched path is a visual web surface (web/modules, "
+                         "web/providers, or top-level web/ style, markup or script)"))
 
-    chapter_text = {chapter.source_path: chapter.text for chapter in dev_chapters}
-    chapter_text[DESIGN_PATH] = design_text
     for order, path, title, reason in sorted(candidates):
         _admit(path, title, chapter_text.get(path, ""), 2, reason)
 
@@ -320,7 +415,7 @@ def governance_context(
     pointers = [f"- `{CHECKLISTS_PATH}` — the complete checklist book; {checklist_pointer}"]
     if not design_touched:
         pointers.append(f"- `{DESIGN_PATH}` — the design system; not inlined because no "
-                        f"touched path is under `{DESIGN_CHANGE_CLASS_PREFIX}`.")
+                        "touched path is a visual web surface.")
     navigation = _join([
         "## Governance navigation (index of sources not inlined)" if packet else
         "## Governance navigation (read on demand)",

@@ -154,7 +154,7 @@ def test_the_brief_carries_the_activated_rules_in_full_and_names_the_rest():
     """The governance tiers on the real corpus: the applicable checklist
     section, BIBLE.md and the standing disclosures arrive in full in the stable
     head, the review protocol this reviewer executes arrives with them, DESIGN
-    arrives only for a change that touches ``web/``, and the map arrives as
+    arrives only for a change that touches a visual surface of ``web/``, and the map arrives as
     navigation with the read instruction. The manifest records every
     disposition, so nothing is silently absent (BIBLE P1)."""
     repo = pathlib.Path(__file__).resolve().parents[1]
@@ -183,7 +183,18 @@ def test_the_brief_carries_the_activated_rules_in_full_and_names_the_rest():
     assert rows["BIBLE.md"]["disposition"] == "inline" and rows["BIBLE.md"]["tier"] == 1
     assert rows["docs/CHECKLISTS_ARCHIVE.md"]["disposition"] == "inline"
     assert rows["docs/CHECKLISTS.md"]["chars"] > 0  # the section this surface supplied
-    assert rows["docs/DESIGN.md"]["disposition"] == "inline"
+    # DESIGN is delivered as its preamble plus the sections that mention a
+    # touched file (owner decision 2026-10-13): the manifest carries the
+    # split -- inline sections, navigation rows for the rest, and no
+    # whole-book row.
+    design_rows = [row for row in facts["governance_manifest"]
+                   if row["path"].startswith("docs/DESIGN.md")]
+    assert "docs/DESIGN.md" not in {row["path"] for row in design_rows}
+    inline_design = {row["path"] for row in design_rows
+                     if row["disposition"] == "inline"}
+    assert "docs/DESIGN.md#intro" in inline_design
+    assert any(path != "docs/DESIGN.md#intro" for path in inline_design)
+    assert any(row["disposition"] == "navigation" for row in design_rows)
     assert rows["docs/ARCHITECTURE.md"]["disposition"] == "navigation"
     assert facts["governance_tokens_estimate"] > 0
 
