@@ -398,7 +398,8 @@ class RetentionWalk:
         if source_path.resolve() != target.resolve():
             target.parent.mkdir(parents=True, exist_ok=True)
             if not verified_destination():
-                temporary = target.with_name(f".{target.name}.tmp.{uuid.uuid4().hex}")
+                from ouroboros.utils import bounded_temp_name
+                temporary = bounded_temp_name(target, f".{target.name}.tmp.{uuid.uuid4().hex}")
                 try:
                     shutil.copyfile(source_path, temporary)
                     obs._chmod_private(temporary)

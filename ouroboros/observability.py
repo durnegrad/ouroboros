@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from ouroboros.secret_masking import SECRET_TOKEN_PATTERNS
 from ouroboros.utils import (
     atomic_write_json,
+    bounded_temp_name,
     extract_trailing_json_object,
     replace_atomic,
     utc_now_iso,
@@ -285,7 +286,7 @@ def write_blob(drive_root: pathlib.Path, payload: Any, *, kind: str = "json") ->
     path.parent.mkdir(parents=True, exist_ok=True)
     _chmod_private_dir(path.parent)
     if not path.exists():
-        tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
+        tmp = bounded_temp_name(path, f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
         try:
             with gzip.open(tmp, "wb") as fh:
                 fh.write(raw)
@@ -1332,7 +1333,7 @@ def preserve_salvaged_output(preserve_root: pathlib.Path, task_id: str, text: st
     path = _observability_root(pathlib.Path(preserve_root)) / SALVAGED_OUTPUT_DIR / f"{safe_task}.txt"
     path.parent.mkdir(parents=True, exist_ok=True)
     _chmod_private_dir(path.parent)
-    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
+    tmp = bounded_temp_name(path, f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
     try:
         tmp.write_text(str(text), encoding="utf-8")
         _chmod_private(tmp)

@@ -537,12 +537,16 @@ def write_blob_stream(drive_root: pathlib.Path, chunks: Any, *, kind: str = "bin
     the blob is written under a temporary name and renamed onto its address.
     """
     from ouroboros.observability import _chmod_private, _chmod_private_dir, _observability_root
-    from ouroboros.utils import replace_atomic
+    from ouroboros.utils import bounded_temp_name, replace_atomic
 
     root = _observability_root(pathlib.Path(drive_root)) / "blobs"
     root.mkdir(parents=True, exist_ok=True)
     _chmod_private_dir(root)
-    tmp = root / f".stream.{kind}.gz.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+    # The content digest is known only at the end, so size the temp against a
+    # target of the SAME name length (64 hex + ".<kind>.gz") rather than the
+    # unknown digest.
+    tmp = bounded_temp_name(root / (f"{'0' * 64}.{kind}.gz"),
+                            f".stream.{kind}.gz.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
     hasher, size = hashlib.sha256(), 0
     try:
         with gzip.open(tmp, "wb") as fh:

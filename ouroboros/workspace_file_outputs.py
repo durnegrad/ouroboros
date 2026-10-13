@@ -254,7 +254,8 @@ class PreparedFileOutputs:
             copy_artifact_file(self.temporary / f"{index}.{suffix}", path, expected=side)
         elif side["kind"] == "symlink":
             path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = path.with_name(f".{uuid4().hex}.tmp")
+            from ouroboros.utils import bounded_temp_name
+            temporary = bounded_temp_name(path, f".{uuid4().hex}.tmp")
             try:
                 temporary.symlink_to(side["link_target"])
                 temporary.replace(path)

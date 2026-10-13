@@ -8,4 +8,12 @@ Enforcement: `tests/test_platform_guard.py` scans `ouroboros/`, `supervisor/` an
 
 ### Shared state-file helpers
 
+
+Every full-file overwrite and every temp-sibling writer that publishes an artifact go through the
+bounded-name seam in `ouroboros/utils.py`: the host path ceiling is MEASURED at first use (bounded
+probe + binary search, not a constant), `path_fits` answers it, and `_atomic_temp_name` clamps the
+temp sibling — which is always ~42-48 characters LONGER than the target it protects, so a target that
+fits can still be unwritable through its own temp. A target at or over the ceiling raises a length
+guard naming the measured path and length instead of an opaque `FileNotFoundError`.
+
 Durable state files use the SSOT helpers in `ouroboros/utils.py`: `atomic_write_json` / `read_json_dict`, and `write_text_atomic` / `write_bytes_atomic` sharing one atomic full-overwrite seam (temp-sibling + `os.replace`, permission bits preserved). A reader sees either the complete old file or the complete new one across a process crash; `fsync` is opt-in, so durability across power loss is not promised, and appends are intentionally NOT atomic (a separate contract). Both are BYTE-EXACT on every platform: the text variant is the bytes variant plus a UTF-8 encode, so the newlines the caller wrote are the newlines on disk and no platform translation rewrites a manifest, a hashed receipt or an LF source file. Prefer these over bare `Path.write_text`/`write_bytes` for full-file overwrites; lockfiles go through `platform_layer.acquire_exclusive_file_lock` / `release_exclusive_file_lock`. Narrow exceptions: `supervisor/state.py` keeps `atomic_write_text` for its mirrored state writes, and `ouroboros/config.py` keeps its settings-file lock because the settings path is bootstrapped before broader runtime helpers may depend on settings state. Enforcement: `tests/test_atomic_write_v639.py`; the prefer-the-helper rule is review-only.

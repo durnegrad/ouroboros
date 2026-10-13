@@ -27,7 +27,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Tuple
 
-from ouroboros.utils import append_jsonl, replace_atomic, utc_now_iso
+from ouroboros.utils import append_jsonl, bounded_temp_name, replace_atomic, utc_now_iso
 from ouroboros._usage_money import LiteralFloat, amount, durable_literals
 
 log = logging.getLogger(__name__)
@@ -295,7 +295,7 @@ def _write_bytes_atomic_fsync(
     live ledger is still the snapshot it folded, INSIDE the swap, so neither a
     lost hold nor an append landing between attempts is erased by a rename)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}")
+    tmp = bounded_temp_name(path, f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}")
     fd: Optional[int] = None
     try:
         # Windows defaults low-level descriptors to text mode, which would

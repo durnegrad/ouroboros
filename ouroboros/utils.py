@@ -12,6 +12,7 @@ import os
 import pathlib
 import re as _re
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -265,6 +266,208 @@ def read_text_across_replace(path: pathlib.Path | str, *, encoding: str = "utf-8
             delay = min(delay * 2, _REPLACE_RETRY_MAX_DELAY_SEC)
 
 
+# ── Path-length ceiling (classic Windows MAX_PATH) ───────────────────────────
+# With long paths disabled system-wide an ordinary path fails at a total of 260
+# characters — measured on this host as 259 OK / 260 "No such file or
+# directory", i.e. a bare error that names neither the cause nor the length.
+# The atomic temp sibling crosses that bound before its target does: its grammar
+# is ~40 characters longer than the name it protects.
+#
+# The ceiling is the FIRST FAILING length, so a creatable path is exactly
+# ``len < ceiling`` — with no extra margin, which would refuse writes this host
+# can actually store.
+_PATH_CEILING_DEFAULT = 260
+# Measuring the real ceiling needs a probe of its own, so only arm it once a
+# target is close enough to the classic bound for the measurement to matter.
+_PATH_CEILING_PROBE_TRIGGER = 200
+_path_ceiling_cache: Optional[int] = None
+
+# Atomic-temp tail grammar, widest first: today's signature, then the widest
+# pid/tid digit widths with a shortened uuid. The segment after the final
+# ".tmp." must stay hex/dots or sweep_stale_temp_files refuses to reap the temp
+# as a legitimate user dotfile.
+_ATOMIC_TEMP_TAILS: Tuple[Tuple[int, int, int], ...] = ((0, 0, 8), (8, 22, 8), (8, 22, 4))
+
+
+def _probe_creatable(root: pathlib.Path, total: int) -> bool:
+    """Whether an ordinary file whose FULL path is ``total`` characters can be created."""
+    if total <= len(str(root)) + 1:
+        return False
+    probe = root / ("p" * (total - len(str(root)) - 1))
+    try:
+        fd = os.open(str(probe), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    except OSError:
+        return False
+    try:
+        os.close(fd)
+        probe.unlink()
+    except OSError:
+        pass
+    return True
+
+
+def _measure_path_ceiling(probe_dir: pathlib.Path | None = None) -> int:
+    """Measure and cache the longest ordinary path this host can create.
+
+    Widening a probe until creation fails is the only construction that names
+    the real boundary; a fixed 260 is a classic-Windows constant, not a property
+    of the host in front of us, so a long-paths-enabled machine must never be
+    shortened by a guess. The probe runs in the shortest writable directory
+    available — MAX_PATH is a property of the API, not of a volume, so a short
+    probe root measures the same limit a deep target will meet.
+
+    A coarse descending ladder finds the neighbourhood cheaply, then a bounded
+    binary search lands on the exact first failing length: a conservative
+    reading would refuse writes this host can actually store.
+    """
+    global _path_ceiling_cache
+    root = pathlib.Path(probe_dir) if probe_dir is not None else pathlib.Path(tempfile.gettempdir())
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        root = pathlib.Path(".")
+    ceiling = _PATH_CEILING_DEFAULT
+    largest_ok = 0
+    first_failed = 0
+    for width in (4096, 1024, 512, 300, 262, 261, 260, 259, 258, 250, 240, 200, 128):
+        if _probe_creatable(root, width):
+            largest_ok = width
+            break
+        first_failed = width
+    if largest_ok and first_failed:
+        lo, hi = largest_ok, first_failed          # lo creatable, hi not
+        while lo + 1 < hi:
+            mid = (lo + hi) // 2
+            if _probe_creatable(root, mid):
+                lo = mid
+            else:
+                hi = mid
+        ceiling = hi
+    elif largest_ok:
+        # Even the widest probe succeeded: paths are not the binding limit here.
+        ceiling = max(largest_ok + 1, _PATH_CEILING_DEFAULT)
+    _path_ceiling_cache = ceiling
+    return ceiling
+
+
+def path_length_ceiling() -> int:
+    """The total-path length at which this host refuses an ordinary create.
+
+    Cached after the first measurement. POSIX and a not-yet-measured Windows
+    host answer the classic 260, which can never make a short path fail.
+    """
+    return _path_ceiling_cache if _path_ceiling_cache is not None else _PATH_CEILING_DEFAULT
+
+
+def ensure_path_ceiling_measured(probe_dir: pathlib.Path | None = None) -> int:
+    """Measure this host's real path ceiling once, before a near-limit compose.
+
+    Measuring happens only on Windows, only once per process, and only when a
+    caller is already close enough to the classic bound for the answer to change
+    what it does — so ordinary short writes never pay for the probe.
+    """
+    if os.name == "nt" and _path_ceiling_cache is None:
+        _measure_path_ceiling(probe_dir)
+    return path_length_ceiling()
+
+
+def path_fits(path: pathlib.Path) -> bool:
+    """Whether an ordinary create at this exact path can succeed on this host.
+
+    The single predicate shared by the length guard and every name composer, so
+    a composer can never build a name the guard then refuses.
+    """
+    return len(str(path)) < path_length_ceiling()
+
+
+def _guard_path_length(path: pathlib.Path, ceiling: int) -> None:
+    """Refuse a target that cannot fit, naming the real numbers.
+
+    A downstream "No such file or directory" from an over-long path is the
+    opaque failure this replaces; the raised message carries the measured
+    length, the ceiling and the tail of the path, so the next reader sees the
+    cause without reproducing the probe.
+    """
+    length = len(str(path))
+    if length < ceiling:
+        return
+    raise OSError(
+        f"path length {length} reaches this host's {ceiling}-character path limit: "
+        f"'{str(path)[-96:]}'"
+    )
+
+
+def ordinary_path_ceiling() -> int:
+    """The path ceiling a NAME COMPOSER sizes itself against.
+
+    Composer-side code asks this before building a name it cannot store; the
+    atomic seam asks it again for the temp sibling. Measuring is armed here too,
+    so a composer seeing a near-limit path gets the host's real ceiling rather
+    than the classic default.
+    """
+    return ensure_path_ceiling_measured()
+
+
+def _atomic_temp_name(name: str, *, parent_chars: int, ceiling: int) -> str:
+    """Compose the atomic temp sibling name so its FULL path stays under ``ceiling``.
+
+    ``os.replace`` needs one filesystem, so the temp lives beside its target.
+    Its grammar is ``.{name}.tmp.{pid}.{tid}.{uuid8}``: pid, thread id and a
+    uuid suffix keep it unique across concurrent writers, and the trailing
+    ``hex.hex.hex`` shape is what ``sweep_stale_temp_files`` reclaims after a
+    hard kill. The temp is always tens of characters longer than the name it
+    protects, so the stem gives first — it is a readable label, not identity
+    (callers that need identity carry it as the digest in their own name) — and
+    only then does the tail narrow to the widest pid/tid digit widths with a
+    shortened uuid. A short name is returned byte-identical to the classic
+    signature.
+    """
+    for pid_digits, tid_digits, uuid_digits in _ATOMIC_TEMP_TAILS:
+        tail = (f"{os.getpid():0{pid_digits}d}"
+                f".{threading.get_ident():0{tid_digits}d}"
+                f".{uuid.uuid4().hex[:uuid_digits]}")
+        reserved = parent_chars + 1 + len(".") + len(".tmp.") + len(tail)
+        budget = ceiling - 1 - reserved
+        if budget >= 1:
+            # A clamp that cuts inside a dotted name would leave the stem ending
+            # in "." and produce "..tmp."; trim it so the signature stays legible.
+            stem = name[:budget].rstrip(".") or name[:budget]
+            return f".{stem}.tmp.{tail}"
+    # Even the narrowest grammar cannot fit beside this target: refuse with the
+    # measured facts rather than emit a name the OS will reject obscurely.
+    raise OSError(
+        f"no atomic temp name fits under this host's {ceiling}-character path limit "
+        f"beside a {len(name)}-character name in a {parent_chars}-character directory"
+    )
+
+
+def bounded_temp_name(target: pathlib.Path, classic_name: str) -> pathlib.Path:
+    """Return a temp sibling of ``target`` whose FULL path fits this host.
+
+    One mechanism for every temp sibling that PUBLISHES a file. The temp is
+    always tens of characters longer than the target it protects, so on a host
+    with a path ceiling a storable target can still be unwritable through its
+    own temp — the failure ``review_source_closure_unavailable`` reports.
+
+    ``classic_name`` is the caller's own historical temp name (``.{uuid}.tmp``,
+    ``.{name}.tmp.{pid}.{tid}.{uuid8}``, ``{name}.tmp.{pid}``). Off the
+    near-limit band this returns it UNCHANGED — byte-identical to today, so
+    ordinary paths neither pay for the probe nor change their grammar; inside
+    the band the atomic seam's own clamp (:func:`_atomic_temp_name`) shortens
+    the stem while keeping the reclaimable ``hex.hex.hex`` tail.
+    """
+    target = pathlib.Path(target)
+    parent = target.parent
+    if len(str(parent)) + 1 + len(target.name) < _PATH_CEILING_PROBE_TRIGGER:
+        return parent / classic_name
+    ceiling = ensure_path_ceiling_measured()
+    if len(str(parent / classic_name)) < ceiling:
+        return parent / classic_name
+    return parent / _atomic_temp_name(
+        target.name, parent_chars=len(str(parent)), ceiling=ceiling
+    )
+
+
 def _atomic_overwrite(path: pathlib.Path, write_temp: Callable[[pathlib.Path], None]) -> None:
     """Run ``write_temp`` against a sibling file, then atomically replace ``path``.
 
@@ -289,12 +492,18 @@ def _atomic_overwrite(path: pathlib.Path, write_temp: Callable[[pathlib.Path], N
     path = pathlib.Path(path)
     assert_test_data_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    parent_chars = len(str(path.parent))
+    if parent_chars + 1 + len(path.name) >= _PATH_CEILING_PROBE_TRIGGER:
+        ceiling = ensure_path_ceiling_measured(path.parent)
+    else:
+        ceiling = path_length_ceiling()
+    _guard_path_length(path, ceiling)
     try:
         # 0o7777 keeps the special bits (setuid/setgid/sticky) too, not just rwx.
         existing_mode = os.stat(path).st_mode & 0o7777
     except OSError:
         existing_mode = None  # new file -> keep the platform default
-    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}")
+    tmp = path.with_name(_atomic_temp_name(path.name, parent_chars=parent_chars, ceiling=ceiling))
     try:
         write_temp(tmp)
         if existing_mode is not None:

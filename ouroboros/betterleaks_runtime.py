@@ -605,7 +605,8 @@ def _download_archive(artifact: BetterleaksArtifact, target: pathlib.Path) -> pa
     except BetterleaksRuntimeError:
         pass
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(f".{target.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
+    from ouroboros.utils import bounded_temp_name
+    temporary = bounded_temp_name(target, f".{target.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
     try:
         request = urllib.request.Request(
             artifact.archive_url,

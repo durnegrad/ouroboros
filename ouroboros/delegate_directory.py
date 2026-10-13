@@ -13,7 +13,7 @@ import uuid
 from ouroboros import delegate_custody as custody
 from ouroboros.configured_subagents import SESSION_ACCESS_PROFILES
 from ouroboros.artifacts import stream_artifact_file
-from ouroboros.utils import atomic_write_json
+from ouroboros.utils import atomic_write_json, bounded_temp_name
 
 
 DIRECTORY_OPTIONS_NEED_WRITE = (
@@ -115,7 +115,7 @@ def prepare_directory_execution(ctx, gateway, target_root, authority, strategy, 
 
 def _download(gateway, run_id, source, destination, expected=None):
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{uuid.uuid4().hex}.tmp")
+    temporary = bounded_temp_name(destination, f".{uuid.uuid4().hex}.tmp")
     try:
         with temporary.open("xb") as sink:
             measured = gateway.stream_run_artifact(run_id, source, sink, expected=expected)

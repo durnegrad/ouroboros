@@ -183,7 +183,8 @@ def clone_project_repo(git_url: str, dest_name: str = "") -> tuple[str, str, str
     dest = projects_root / name
     if dest.exists():
         return "", "exists", f"destination already exists: {dest}"
-    tmp = projects_root / f"{name}.tmp.{os.getpid()}"
+    from ouroboros.utils import bounded_temp_name
+    tmp = bounded_temp_name(dest, f"{name}.tmp.{os.getpid()}")
     if tmp.exists():
         shutil.rmtree(tmp, ignore_errors=True)
     bootstrap_process_path()

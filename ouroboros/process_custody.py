@@ -46,7 +46,7 @@ from ouroboros.platform_layer import (
     subprocess_new_group_kwargs,
 )
 from ouroboros.process_containment import pid_is_zombie, process_group_has_live_members
-from ouroboros.utils import append_jsonl, utc_now_iso
+from ouroboros.utils import append_jsonl, bounded_temp_name, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -416,7 +416,7 @@ def _rewrite_ledger(
                     if not pid or survivors.pop(pid, None) == row:
                         kept.append(line)
                 payload = b"".join(reversed(kept)) + current[len(previous):]
-            tmp = path.with_name(path.name + f".tmp.{os.getpid()}")
+            tmp = bounded_temp_name(path, path.name + f".tmp.{os.getpid()}")
             tmp.write_bytes(payload)
             replace_atomic(tmp, path)
         finally:

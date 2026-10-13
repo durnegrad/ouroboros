@@ -17,7 +17,10 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any, Dict, Iterable, List, Optional, Union
 
-from ouroboros.utils import atomic_write_json, read_json_dict, update_json_locked, write_bytes_atomic
+from ouroboros.utils import (
+    atomic_write_json, bounded_temp_name, ordinary_path_ceiling, path_fits,
+    read_json_dict, update_json_locked, write_bytes_atomic,
+)
 from ouroboros.headless import ARTIFACT_STATUS_FAILED, ARTIFACT_STATUS_READY, SCRATCH_MANIFEST_NAME, task_artifacts_dir
 from ouroboros.outcome_receipt_store import is_verification_receipts_path
 from ouroboros.task_custody import fence_publication
@@ -65,6 +68,10 @@ _MAX_SCRATCH_PATHS = 1000
 _ATTACHMENTS_SUBDIR = "attachments"
 _CHAT_MEDIA_SUBDIR = "chat_media"
 _SOURCE_HANDLES_SUBDIR = "source_handles"
+# The plan-review wave reader (review_source_closure.promote_source_payload)
+# classifies a stored handle by this prefix, so a length fit must never cut it
+# away: at an abnormally deep root the fit is refused instead.
+_PLAN_WAVE_SOURCE_PREFIX = "plan-review-wave-"
 _SOURCE_HANDLE_CATEGORIES = frozenset({"tool_results", "context_checkpoints", "delegated_activity"})
 _LEGACY_TOOL_RESULT_TRUNCATION_RE = re.compile(
     r"\n\.\.\. \(truncated from (?P<original>[1-9][0-9]*) chars, "
@@ -673,6 +680,52 @@ def task_artifact_dir_path(drive_root: Union[pathlib.Path, str], task_id: str, *
     return task_artifacts_dir(pathlib.Path(drive_root), validate_task_id(task_id), create=create)
 
 
+def choose_source_name(source_id: str, digest: str, extension: str, artifact_dir: pathlib.Path,
+                       *, primary_category: str) -> str:
+    """Length-fit a source-handle stem so the composed path can be STORED.
+
+    Long source ids — a plan-review wave is a cycle plus a 64-hex fingerprint —
+    can push the composed handle past a classic-Windows MAX_PATH once the
+    artifact root is deep, and the atomic temp sibling then crosses it first.
+    The ``-<digest>`` suffix carries identity, so the readable stem is a label
+    and yields first.
+
+    The shortened stem must be a FIXED POINT of this function: retention reads
+    ``source_id`` back out of the stored filename and stores it again, so a
+    prefix that sanitizes differently would compose a second name there. The cut
+    therefore lands on a ``.`` boundary when one is available.
+
+    The budget uses the LONGEST category: retention re-stores a preserved source
+    under its own category, and a stem sized only for ``primary_category`` could
+    still overflow there.
+    """
+    ceiling = ordinary_path_ceiling()
+    tail = f"-{digest}.{extension}"
+    longest_category = max((*_SOURCE_HANDLE_CATEGORIES, primary_category), key=len)
+    fixed = (len(str(artifact_dir)) + 1 + len(_SOURCE_HANDLES_SUBDIR) + 1
+             + len(longest_category) + 1 + len(tail))
+    budget = ceiling - 1 - fixed
+    if budget < 1:
+        raise OSError(
+            f"no source-handle name can fit this host's {ceiling}-character path limit "
+            f"under '{artifact_dir}' (the fixed suffix needs {fixed})"
+        )
+    if len(source_id) <= budget:
+        return source_id
+    cut = source_id[:budget]
+    boundary = cut.rfind(".")
+    if boundary > 0:
+        cut = cut[:boundary]
+    cut = cut.rstrip("._") or source_id[:1]
+    if source_id.startswith(_PLAN_WAVE_SOURCE_PREFIX) and not cut.startswith(_PLAN_WAVE_SOURCE_PREFIX):
+        raise OSError(
+            f"source-handle name cannot fit this host's {ceiling}-character path limit "
+            f"without cutting the '{_PLAN_WAVE_SOURCE_PREFIX}' classification prefix "
+            f"under '{artifact_dir}'"
+        )
+    return cut
+
+
 def store_actor_source_bytes(
     drive_root: Union[pathlib.Path, str],
     task_id: str,
@@ -698,6 +751,19 @@ def store_actor_source_bytes(
         f"{safe_id}-{digest}.{safe_extension}",
     )
     target = artifact_dir.joinpath(*relative.parts)
+    if not path_fits(target):
+        # Long source ids (a plan-review wave is a cycle plus a 64-hex
+        # fingerprint) can push the composed handle past the host's path limit
+        # once the artifact root is deep. The digest names the handle uniquely,
+        # so the readable stem — not the identity — yields first.
+        safe_id = choose_source_name(safe_id, digest, safe_extension, artifact_dir,
+                                     primary_category=normalized_category)
+        relative = pathlib.PurePosixPath(
+            _SOURCE_HANDLES_SUBDIR,
+            normalized_category,
+            f"{safe_id}-{digest}.{safe_extension}",
+        )
+        target = artifact_dir.joinpath(*relative.parts)
     # WRITE-ONCE. The name carries the digest, so an existing file with exactly
     # these bytes IS this handle: rewriting it would only republish identical
     # content while racing another writer for the same path (on Windows an
@@ -1236,7 +1302,7 @@ def copy_artifact_file(source: Any, destination: pathlib.Path, *, expected: Any 
         return stream_artifact_file(source, expected=expected)
     fence_publication()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{uuid.uuid4().hex}.tmp")
+    temporary = bounded_temp_name(destination, f".{uuid.uuid4().hex}.tmp")
     try:
         with temporary.open("xb") as sink:
             measured = stream_artifact_file(source, sink, expected=expected)

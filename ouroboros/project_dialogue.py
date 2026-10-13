@@ -22,7 +22,7 @@ from ouroboros.acceptance_preparation import incident_cause_clauses
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 from ouroboros.review_records import recorded_author_stop
 from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_SALVAGE
-from ouroboros.utils import append_jsonl, iter_jsonl_objects, jsonl_append_lock_path, replace_atomic, strip_markdown, utc_now_iso
+from ouroboros.utils import append_jsonl, bounded_temp_name, iter_jsonl_objects, jsonl_append_lock_path, replace_atomic, strip_markdown, utc_now_iso
 
 _ANNOTATIONS_NAME = "chat_annotations.jsonl"
 # Receipt id for a routing act that belongs to NO owner message — the agent's
@@ -439,7 +439,7 @@ def _compact_annotations_locked(drive_root: Any, path: pathlib.Path) -> None:
         if message_id in retained_ids or message_id in kept_receipts
     ]
     rows.sort(key=lambda row: str(row.get("ts") or ""))
-    tmp = path.with_name(f".{path.name}.tmp.{uuid.uuid4().hex}")
+    tmp = bounded_temp_name(path, f".{path.name}.tmp.{uuid.uuid4().hex}")
     data = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows).encode("utf-8")
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
     try:

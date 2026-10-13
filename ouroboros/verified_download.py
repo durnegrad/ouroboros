@@ -11,7 +11,7 @@ import pathlib
 from typing import Any
 import uuid
 
-from ouroboros.utils import replace_atomic
+from ouroboros.utils import bounded_temp_name, replace_atomic
 
 
 class VerifiedDownloadError(RuntimeError):
@@ -82,7 +82,7 @@ def fetch_exact_file(
     except error_type:
         pass
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(f".{target.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
+    temporary = bounded_temp_name(target, f".{target.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
     try:
         import httpx
 
