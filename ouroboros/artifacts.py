@@ -18,7 +18,8 @@ from hashlib import sha256
 from typing import Any, Dict, Iterable, List, Optional, Union
 
 from ouroboros.utils import (
-    atomic_write_json, bounded_temp_name, ordinary_path_ceiling, path_fits,
+    atomic_write_json, bounded_temp_name, extended_io_path, long_path_io_available,
+    ordinary_path_ceiling, path_fits, path_length_ceiling, replace_atomic,
     read_json_dict, update_json_locked, write_bytes_atomic,
 )
 from ouroboros.headless import ARTIFACT_STATUS_FAILED, ARTIFACT_STATUS_READY, SCRATCH_MANIFEST_NAME, task_artifacts_dir
@@ -70,8 +71,11 @@ _CHAT_MEDIA_SUBDIR = "chat_media"
 _SOURCE_HANDLES_SUBDIR = "source_handles"
 # The plan-review wave reader (review_source_closure.promote_source_payload)
 # classifies a stored handle by this prefix, so a length fit must never cut it
-# away: at an abnormally deep root the fit is refused instead.
+# away: where no extended path can carry the longer name, the fit is refused.
 _PLAN_WAVE_SOURCE_PREFIX = "plan-review-wave-"
+# A file NAME has its own per-component bound, which the extended-length form does
+# not lift; the value leaves room for the digest suffix plus the extension.
+_MAX_SOURCE_NAME_CHARS = 200
 _SOURCE_HANDLE_CATEGORIES = frozenset({"tool_results", "context_checkpoints", "delegated_activity"})
 _LEGACY_TOOL_RESULT_TRUNCATION_RE = re.compile(
     r"\n\.\.\. \(truncated from (?P<original>[1-9][0-9]*) chars, "
@@ -706,10 +710,16 @@ def choose_source_name(source_id: str, digest: str, extension: str, artifact_dir
              + len(longest_category) + 1 + len(tail))
     budget = ceiling - 1 - fixed
     if budget < 1:
-        raise OSError(
-            f"no source-handle name can fit this host's {ceiling}-character path limit "
-            f"under '{artifact_dir}' (the fixed suffix needs {fixed})"
-        )
+        # A root deep enough to leave no room at all is no reason to lose the
+        # handle: on a host that reaches such a path through its extended form,
+        # the stem is bounded by what a FILE NAME may be, not by the classic
+        # whole-path ceiling. Where no extended form exists the refusal stands.
+        if not long_path_io_available():
+            raise OSError(
+                f"no source-handle name can fit this host's {ceiling}-character path limit "
+                f"under '{artifact_dir}' (the fixed suffix needs {fixed})"
+            )
+        return _fit_name_to_component(source_id, tail)
     if len(source_id) <= budget:
         return source_id
     cut = source_id[:budget]
@@ -718,12 +728,33 @@ def choose_source_name(source_id: str, digest: str, extension: str, artifact_dir
         cut = cut[:boundary]
     cut = cut.rstrip("._") or source_id[:1]
     if source_id.startswith(_PLAN_WAVE_SOURCE_PREFIX) and not cut.startswith(_PLAN_WAVE_SOURCE_PREFIX):
-        raise OSError(
-            f"source-handle name cannot fit this host's {ceiling}-character path limit "
-            f"without cutting the '{_PLAN_WAVE_SOURCE_PREFIX}' classification prefix "
-            f"under '{artifact_dir}'"
-        )
+        if not long_path_io_available():
+            raise OSError(
+                f"source-handle name cannot fit this host's {ceiling}-character path limit "
+                f"without cutting the '{_PLAN_WAVE_SOURCE_PREFIX}' classification prefix "
+                f"under '{artifact_dir}'"
+            )
+        # The extended form reaches the longer path, so keep the prefix the plan
+        # review reader classifies on and bound only the file-name component.
+        return _fit_name_to_component(source_id, tail)
     return cut
+
+
+def _fit_name_to_component(source_id: str, tail: str) -> str:
+    """Bound a stem by what a file NAME may be, keeping any classification prefix.
+
+    The extended-length form lifts the whole-path ceiling, not the per-component
+    one, so the stem still yields — the digest suffix carries identity and the
+    prefix carries classification, and both therefore stay.
+    """
+    room = _MAX_SOURCE_NAME_CHARS - len(tail)
+    if len(source_id) <= room:
+        return source_id
+    if source_id.startswith(_PLAN_WAVE_SOURCE_PREFIX):
+        keep = room - len(_PLAN_WAVE_SOURCE_PREFIX)
+        stem = source_id[len(_PLAN_WAVE_SOURCE_PREFIX):][:keep].rstrip("._") or "wave"
+        return _PLAN_WAVE_SOURCE_PREFIX + stem
+    return source_id[:room].rstrip("._") or source_id[:1]
 
 
 def store_actor_source_bytes(
@@ -770,7 +801,8 @@ def store_actor_source_bytes(
     # os.replace over a destination a concurrent reader holds open is a sharing
     # violation, which is how a second copy-back of the same handle used to fail).
     try:
-        already_stored = not target.is_symlink() and target.read_bytes() == bytes(data)
+        target_io = extended_io_path(target)
+        already_stored = not target_io.is_symlink() and target_io.read_bytes() == bytes(data)
     except OSError:
         already_stored = False
     if not already_stored:
@@ -809,17 +841,26 @@ def read_actor_source_bytes(
         raise ValueError("actor source ref has an invalid path")
     base = task_artifact_dir_path(drive_root, task_id, create=False).resolve(strict=False)
     target = base.joinpath(*rel.parts)
-    if target.is_symlink():
+    if extended_io_path(target).is_symlink():
         raise ValueError("actor source ref may not be a symlink")
+    # Both sides of the containment resolve run through ONE spelling: a target
+    # the OS reaches only through the extended form must not look like an
+    # escape merely because its base composes shorter. Short paths keep the
+    # plain resolution of today, byte for byte.
+    deep = os.name == "nt" and (len(str(target)) >= path_length_ceiling()
+                                 or len(str(base)) >= path_length_ceiling())
     try:
-        target = target.resolve(strict=True)
-        target.relative_to(base)
+        target = (extended_io_path(target, force=deep).resolve(strict=True) if deep
+                  else target.resolve(strict=True))
+        anchor = (extended_io_path(base, force=deep).resolve(strict=False) if deep
+                  else base.resolve(strict=False))
+        target.relative_to(anchor)
     except FileNotFoundError:
         from ouroboros.source_retention import read_retained_task_source
         return read_retained_task_source(drive_root, task_id, ref)
     except ValueError as exc:
         raise ValueError("actor source ref escapes its task artifact root") from exc
-    raw = target.read_bytes()
+    raw = extended_io_path(target).read_bytes()
     try:
         expected_size = int(ref["size"])
     except (KeyError, TypeError, ValueError) as exc:
@@ -1251,6 +1292,32 @@ class ArtifactIdentityError(OSError):
         self.source_path, self.source_stamp = source_path, source_stamp
 
 
+def _stat_reachable(path: pathlib.Path) -> os.stat_result:
+    """``stat`` through the form this host can reach: the logical path when it is
+    short enough, the extended spelling of the SAME file when it is not."""
+    if len(str(path)) < 260:
+        return path.stat()
+    return extended_io_path(path).stat()
+
+
+def _is_file_reachable(path: pathlib.Path) -> bool:
+    """``is_file`` through the reachable form, so a deep handle is not invisible."""
+    return path.is_file() if len(str(path)) < 260 else extended_io_path(path).is_file()
+
+
+def _is_symlink_reachable(path: pathlib.Path) -> bool:
+    """``is_symlink`` through the reachable form (``rglob`` members included)."""
+    return path.is_symlink() if len(str(path)) < 260 else extended_io_path(path).is_symlink()
+
+
+def _resolve_reachable(path: pathlib.Path, *, strict: bool = False) -> pathlib.Path:
+    """``resolve`` through the reachable form; the result keeps the ordinary spelling
+    of the LOGICAL path (the extended prefix is stripped by ``resolve`` itself)."""
+    if len(str(path)) < 260:
+        return path.resolve(strict=strict)
+    return extended_io_path(path).resolve(strict=strict)
+
+
 def stream_artifact_file(path: Any, sink: Any = None, *, expected: Any = None) -> Dict[str, Any]:
     """Hash/copy regular bytes in bounded chunks; prove descriptor/path stability
     through EOF and ``expected`` identity before publication. Missing/changing bytes
@@ -1258,11 +1325,16 @@ def stream_artifact_file(path: Any, sink: Any = None, *, expected: Any = None) -
     stay open and prove only their descriptor; network/pipe streams are not inputs.
     """
     source_path = pathlib.Path(path) if isinstance(path, (str, os.PathLike)) else None
+    # A deep logical path (past the classic ceiling) can only be OPENED through the
+    # extended form — same file, different spelling — while short paths keep the
+    # ordinary one so descriptor-based reads stay byte-identical.
+    open_path = (extended_io_path(source_path) if source_path is not None and len(str(source_path)) >= 260
+                 else source_path)
     digest, size = sha256(), 0
     def identity(observation: os.stat_result) -> tuple:
         return (observation.st_dev, observation.st_ino, observation.st_size,
                 observation.st_mtime_ns, observation.st_ctime_ns)
-    with source_path.open("rb") if source_path is not None else nullcontext(path) as handle:
+    with open_path.open("rb") if source_path is not None else nullcontext(path) as handle:
         before = os.fstat(handle.fileno())
         if not stat.S_ISREG(before.st_mode):
             raise OSError(f"artifact source is not a regular file: {path}")
@@ -1277,7 +1349,7 @@ def stream_artifact_file(path: Any, sink: Any = None, *, expected: Any = None) -
             if size > before.st_size:
                 raise OSError(f"artifact source size changed during read: {path}")
         if (identity(before) != identity(os.fstat(handle.fileno()))
-                or (source_path is not None and identity(before) != identity(source_path.stat()))):
+                or (source_path is not None and identity(before) != identity(_stat_reachable(source_path)))):
             raise OSError(f"artifact source changed during read: {path}")
     result = {"size": size, "sha256": digest.hexdigest()}
     if size != before.st_size:
@@ -1301,17 +1373,20 @@ def copy_artifact_file(source: Any, destination: pathlib.Path, *, expected: Any 
     if source_path is not None and not destination.is_symlink() and source_path.resolve(strict=False) == destination.resolve(strict=False):
         return stream_artifact_file(source, expected=expected)
     fence_publication()
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    extended_io_path(destination.parent).mkdir(parents=True, exist_ok=True)
     temporary = bounded_temp_name(destination, f".{uuid.uuid4().hex}.tmp")
+    temporary_io = extended_io_path(temporary)
     try:
-        with temporary.open("xb") as sink:
-            measured = stream_artifact_file(source, sink, expected=expected)
+        with temporary_io.open("xb") as sink:
+            measured = stream_artifact_file(
+                source if source_path is None else extended_io_path(source_path),
+                sink, expected=expected)
         if source_path is not None:
-            shutil.copystat(source_path, temporary)
-        temporary.replace(destination)
+            shutil.copystat(source_path, temporary_io)
+        replace_atomic(temporary, destination)
         return measured
     finally:
-        temporary.unlink(missing_ok=True)
+        temporary_io.unlink(missing_ok=True)
 
 
 def artifact_record(path: pathlib.Path, *, kind: str = "task_artifact", source_path: str = "") -> Dict[str, Any]:
@@ -1493,11 +1568,22 @@ def iter_artifact_tree(root: pathlib.Path) -> Iterable[pathlib.Path]:
     """Enumerate the full tree without following directory links or hiding I/O failures."""
     def failed(exc: OSError) -> None:
         raise exc
-    for directory, dirs, files in os.walk(root, onerror=failed, followlinks=False):
+    for directory, dirs, files in os.walk(extended_io_path(root), onerror=failed, followlinks=False):
         dirs.sort()
         for name in sorted([*dirs, *files]):
+            # os.walk yields the spelling it was given, so a walk rooted through the
+            # extended form yields extended members. The LOGICAL path stays the
+            # ordinary spelling (callers compose and report it): the extended prefix
+            # of the walk root is stripped back so the yielded identity is ordinary,
+            # while the stat that proves the member exists goes through the form
+            # this host can actually reach — a deep handle written through the
+            # extended form is therefore not invisible to the listing that needs it.
             path = pathlib.Path(directory) / name
-            path.lstat()  # A disappearing or unreadable member is not an empty entry.
+            walk_root = str(extended_io_path(root))
+            if str(path).startswith(walk_root):
+                suffix = str(path)[len(walk_root):].lstrip("\\/")
+                path = pathlib.Path(root) / suffix if suffix else pathlib.Path(root)
+            (path.lstat() if len(str(path)) < 260 else extended_io_path(path).lstat())
             yield path
 
 
@@ -1600,14 +1686,14 @@ def collect_task_artifact_records(
             if path.is_symlink() or not path.resolve().is_relative_to(artifact_root) or not path.is_file():
                 raise OSError(f"registered artifact is unavailable or outside its owner: {name}")
     members = iter_artifact_tree(artifact_dir) if strict else artifact_dir.rglob("*")
-    for path in sorted(p for p in members if p.is_file() and not p.is_symlink()):
+    for path in sorted(p for p in members if _is_file_reachable(p) and not _is_symlink_reachable(p)):
         # Metadata (manifests, the registration lock) and the receipt stream (its own
         # union writer) are not deliverables.
         if (path.name in (_ARTIFACT_MANIFEST, SCRATCH_MANIFEST_NAME) or path == artifact_dir / (_ARTIFACT_MANIFEST + ".lock")
                 or is_verification_receipts_path(drive_root, task_id, path)):
             continue
         try:
-            rel_parts = path.resolve(strict=False).relative_to(artifact_root).parts
+            rel_parts = _resolve_reachable(path, strict=False).relative_to(artifact_root).parts
         except (OSError, ValueError):
             continue  # reached through a link: not this store's material
         # Staged inputs, chat media and source handles are not deliverables.
@@ -1619,7 +1705,7 @@ def collect_task_artifact_records(
             if not measure:  # an immutable registration keeps its recorded identity; nothing else is claimed
                 registered = manifest_record or {}
                 records.append({"kind": str(registered.get("kind") or "task_artifact"), "name": path.name,
-                                "path": str(path), **nested, "size": path.lstat().st_size, "measured": False,
+                                "path": str(path), **nested, "size": _stat_reachable(path).st_size, "measured": False,
                                 **({key: registered.get(key) for key in ("immutable", "size", "sha256")}
                                    if registered.get("immutable") else {})})
                 continue

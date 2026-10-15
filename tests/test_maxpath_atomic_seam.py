@@ -6,6 +6,12 @@ Windows error names neither the cause nor the length. The atomic temp sibling is
 ~40 characters longer than the name it protects, so a target that fits can still
 be unwritable — that is the seam these tests pin.
 
+The refusal half of the contract — an ordinary path with no extended-length
+form — is what this file pins, deterministically via ``_no_extended``; the
+degradation half (an extended-capable host keeps the full handle and issues
+the over-limit I/O through that form) is pinned in
+``tests/test_path_ceiling_degradation.py``.
+
 Determinism: the seam reads one cached ceiling (``utils.path_length_ceiling``),
 so these tests drive that value directly instead of depending on the running
 host's limit. One Windows-only case additionally proves the real limit by
@@ -37,6 +43,22 @@ def _wide_ids(monkeypatch) -> None:
     monkeypatch.setattr(
         utils, "threading", types.SimpleNamespace(get_ident=lambda: 99999999999999999999)
     )
+
+
+def _no_extended(monkeypatch) -> None:
+    """Drive the composers as a host with NO extended-length form.
+
+    The honest refusal when nothing fits is the POSIX / long-paths-disabled
+    Windows behaviour; pinning it keeps these cases deterministic instead of
+    depending on the running host's facility. BOTH import seams are pinned:
+    ``utils`` owns the guard and the temp composer, while ``artifacts``
+    re-imports ``long_path_io_available`` for ``choose_source_name`` and the
+    ``path_fits`` pre-check, so patching one module alone leaves the other
+    half of the seam live.
+    """
+    monkeypatch.setattr(utils, "long_path_io_available", lambda: False)
+    from ouroboros import artifacts as artifacts_module
+    monkeypatch.setattr(artifacts_module, "long_path_io_available", lambda: False)
 
 
 def _padded_dir(root: pathlib.Path, total_len: int) -> pathlib.Path:
@@ -74,6 +96,7 @@ def test_temp_sibling_fits_when_the_target_fits(monkeypatch):
     the seam must clamp the stem rather than emit a path the OS will reject.
     """
     _pin_ceiling(monkeypatch, 240)
+    _no_extended(monkeypatch)
     _wide_ids(monkeypatch)
     for parent_chars, name_len in ((100, 60), (140, 60), (170, 50), (180, 40), (190, 5)):
         name = utils._atomic_temp_name("x" * name_len, parent_chars=parent_chars, ceiling=240)
@@ -89,6 +112,7 @@ def test_temp_sibling_fits_when_the_target_fits(monkeypatch):
 def test_temp_composer_refuses_with_measured_numbers_when_nothing_fits(monkeypatch):
     """When even the narrowest grammar cannot fit, the refusal names the facts."""
     _pin_ceiling(monkeypatch, 240)
+    _no_extended(monkeypatch)
     _wide_ids(monkeypatch)
     with pytest.raises(OSError) as excinfo:
         utils._atomic_temp_name("x" * 20, parent_chars=195, ceiling=240)
@@ -100,6 +124,7 @@ def test_temp_composer_refuses_with_measured_numbers_when_nothing_fits(monkeypat
 def test_a_target_that_cannot_fit_is_refused_with_measured_numbers(monkeypatch):
     """The guard replaces an opaque OS error with the length and the ceiling."""
     _pin_ceiling(monkeypatch, 120)
+    _no_extended(monkeypatch)
     root = pathlib.Path(".").resolve() / "pytest_maxpath_tmp"
     parent = _padded_dir(root, 110)
     try:
@@ -128,6 +153,7 @@ def test_atomic_round_trip_just_under_the_atomic_bound(monkeypatch):
         target = parent / ("t" * 40)  # 165 + 1 + 40 = 206
         ceiling = 251  # within this host's real limit; leaves the temp sibling room
         _pin_ceiling(monkeypatch, ceiling)
+        _no_extended(monkeypatch)
         write_bytes_atomic(target, b"near-limit payload")
         assert target.read_bytes() == b"near-limit payload"
         assert not list(parent.glob(".*.tmp.*")), "temp sibling left behind"
@@ -202,6 +228,7 @@ def test_source_handle_name_fits_and_is_its_own_fixed_point(monkeypatch, tmp_pat
     ceiling = len(str(artifact_dir)) + len("source_handles/context_checkpoints") + 2 + 20 + tail + 1
     assert ceiling < 260, "fixture must stay within this host's real limit"
     _pin_ceiling(monkeypatch, ceiling)
+    _no_extended(monkeypatch)
 
     ref = store_actor_source_bytes(
         tmp_path, "task-1", category="context_checkpoints",
@@ -236,6 +263,7 @@ def test_the_wave_fingerprint_keeps_its_identity_under_clamping(monkeypatch, tmp
     ceiling = len(str(artifact_dir)) + len("source_handles/context_checkpoints") + 2 + 20 + tail + 1
     assert ceiling < 260, "fixture must stay within this host's real limit"
     _pin_ceiling(monkeypatch, ceiling)
+    _no_extended(monkeypatch)
 
     ref = store_actor_source_bytes(
         tmp_path, "task-2", category="context_checkpoints",
@@ -267,6 +295,7 @@ def test_a_wave_handle_refuses_rather_than_cut_its_reader_prefix(monkeypatch, tm
                + 2 + 12 + tail + 1)
     assert ceiling < 260, "fixture must stay within this host's real limit"
     _pin_ceiling(monkeypatch, ceiling)
+    _no_extended(monkeypatch)
     with pytest.raises(OSError) as excinfo:
         store_actor_source_bytes(tmp_path, "task-3", category="context_checkpoints",
                                  source_id=source_id, data=b"{}", extension="json")
@@ -275,7 +304,7 @@ def test_a_wave_handle_refuses_rather_than_cut_its_reader_prefix(monkeypatch, tm
 
 @pytest.mark.skipif(not sys.platform.startswith("win"),
                     reason="the classic MAX_PATH boundary is a Windows behaviour")
-def test_real_measured_limit_round_trip_on_this_host(tmp_path):
+def test_real_measured_limit_round_trip_on_this_host(monkeypatch, tmp_path):
     """Prove the ceiling by construction: a real write beside the measured limit.
 
     The seam measures this host instead of assuming 260, so this test uses the
@@ -283,6 +312,7 @@ def test_real_measured_limit_round_trip_on_this_host(tmp_path):
     """
     ceiling = utils.path_length_ceiling()
     assert ceiling >= 100
+    _no_extended(monkeypatch)
 
     depth = tmp_path
     while len(str(depth)) < ceiling - 60:

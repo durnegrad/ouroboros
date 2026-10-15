@@ -76,7 +76,7 @@ import uuid
 from typing import Any, Callable, ContextManager, Dict, Iterator, List, Optional, Tuple
 
 from ouroboros.task_results import load_task_result, validate_task_id, write_task_result
-from ouroboros.utils import utc_now_iso
+from ouroboros.utils import rmtree_extended, utc_now_iso
 from ouroboros.owner_mailbox import _mailbox_path, _MAILBOX_DIR as _OWNER_MAILBOX_DIR
 
 log = logging.getLogger(__name__)
@@ -1162,7 +1162,7 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
                 trash.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(base, trash)
         outcome.update(status="removed")
-        shutil.rmtree(trash, ignore_errors=True)
+        rmtree_extended(trash, ignore_errors=True)
     except _Retained as retained:
         # A fenced write surfaces as its caller's own failure reason: a closed generation names the close.
         outcome["reason"] = "generation_closed" if closed() else str(retained)
@@ -1171,7 +1171,7 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
         if not closed():
             log.warning("Child drive %s kept: custody could not be proven", drive, exc_info=True)
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        rmtree_extended(staging, ignore_errors=True)
     if report is not None:
         if outcome["published"]:
             report.setdefault("custodied", []).append({"task_id": tid, "published": outcome["published"]})
@@ -1197,7 +1197,7 @@ def sweep_custody_leftovers(canonical_root: Any, *, min_age_sec: float = 3600.0)
                 if time.time() - entry.lstat().st_mtime < min_age_sec:
                     continue
                 if entry.is_dir() and not entry.is_symlink():
-                    shutil.rmtree(entry, ignore_errors=True)
+                    rmtree_extended(entry, ignore_errors=True)
                 else:
                     entry.unlink(missing_ok=True)
             except OSError:

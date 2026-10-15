@@ -25,7 +25,7 @@ from ouroboros.workspace_file_outputs import _directory_direct_artifacts
 from ouroboros.task_results import (
     cancellation_blocks_child_result, load_task_result, validate_task_id, write_task_result,
 )
-from ouroboros.utils import atomic_write_json, utc_now_iso
+from ouroboros.utils import atomic_write_json, rmtree_extended, utc_now_iso
 from ouroboros.headless_status import (  # noqa: F401
     ARTIFACT_STATUS_FAILED,
     ARTIFACT_STATUS_FINALIZING,
@@ -347,7 +347,7 @@ def prune_task_trees(
             if _timestamp_from_result(result, dir_mtime) > cutoff:
                 report["skipped"].append({"root_task_id": root_id, "reason": "younger_than_retention"})
                 continue
-            shutil.rmtree(tree_dir)
+            rmtree_extended(tree_dir)
             report["pruned"].append({"root_task_id": root_id, "path": str(tree_dir)})
         except Exception as exc:
             report["errors"].append({"root_task_id": root_id, "error": f"{type(exc).__name__}: {exc}"})

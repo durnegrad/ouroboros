@@ -11,6 +11,7 @@ import math
 import os
 import pathlib
 import re as _re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -239,7 +240,14 @@ def replace_atomic(
         if precondition is not None and not precondition():
             return False
         try:
-            os.replace(src, dst)
+            src_io = extended_io_path(src)
+            dst_io = extended_io_path(dst)
+            if str(src_io) != str(src) or str(dst_io) != str(dst):
+                # One side needs the extended spelling: the pair moves together,
+                # so the OS's rename call sees one form for both names.
+                src_io = extended_io_path(src, force=True)
+                dst_io = extended_io_path(dst, force=True)
+            os.replace(src_io, dst_io)
             return True
         except PermissionError:
             if attempt == _REPLACE_RETRY_ATTEMPTS - 1:
@@ -377,7 +385,64 @@ def path_fits(path: pathlib.Path) -> bool:
     The single predicate shared by the length guard and every name composer, so
     a composer can never build a name the guard then refuses.
     """
-    return len(str(path)) < path_length_ceiling()
+    limit = _LONG_PATH_LIMIT if long_path_io_available() else path_length_ceiling()
+    return len(str(path)) < limit
+
+
+# The extended-length form's own ceiling. Windows rejects a longer path whatever
+# prefix it carries, so this is a platform bound rather than a per-directory
+# measurement.
+_LONG_PATH_LIMIT = 32000
+
+
+def extended_io_path(path: pathlib.Path | str, *, force: bool = False) -> pathlib.Path:
+    """``path`` in the form this OS needs to REACH it.
+
+    Past its classic ceiling an ordinary Windows path fails with a bare
+    FileNotFoundError naming neither the length nor the cause, while the
+    extended-length form reaches the SAME file. The logical path never changes:
+    callers keep composing, storing and addressing the ordinary spelling, and
+    only the I/O of a path the OS cannot otherwise open is issued this way.
+    POSIX and short paths are returned UNCHANGED. ``force`` takes the extended
+    spelling even below the classic bound, for a caller that must keep both
+    sides of one OS operation in a single form.
+    """
+    path = pathlib.Path(path)
+    if os.name != "nt" or (not force and len(str(path)) < _PATH_CEILING_DEFAULT):
+        return path
+    text = str(path)
+    if text.startswith("\\\\?\\"):
+        return path
+    absolute = os.path.abspath(text)
+    # A UNC share has its own extended prefix; a drive path takes the plain one.
+    return pathlib.Path(("\\\\?\\UNC\\" + absolute[2:]) if absolute.startswith("\\\\")
+                        else "\\\\?\\" + absolute)
+
+
+def rmtree_extended(path: pathlib.Path | str, *, ignore_errors: bool = False) -> None:
+    """Delete a directory tree, reachable when members sit past the classic path ceiling.
+
+    A tree whose deep members were WRITTEN through the extended form cannot be
+    removed by an ordinary ``shutil.rmtree``: the walk's own os.scandir fails on
+    a directory it cannot reach, leaving the tree stranded on disk. The walk is
+    issued through the forced extended form (one spelling for every member), so
+    a member written through either form is enumerated and deleted. The logical
+    path stays what the caller composed; ``ignore_errors`` keeps
+    ``shutil.rmtree`` semantics for best-effort cleanup.
+    """
+    shutil.rmtree(extended_io_path(path, force=True), ignore_errors=ignore_errors)
+
+
+def long_path_io_available() -> bool:
+    """Whether this host is expected to reach a path past its classic ceiling.
+
+    A declared PLATFORM fact, never a guess about one directory: the extended
+    form is a Windows facility, so POSIX keeps the composer's ordinary ceiling
+    and its honest refusal. A host that forbids it anyway fails at the write,
+    and the atomic seam re-raises that as the measured-length error rather than
+    an opaque OS code.
+    """
+    return os.name == "nt"
 
 
 def _guard_path_length(path: pathlib.Path, ceiling: int) -> None:
@@ -386,8 +451,11 @@ def _guard_path_length(path: pathlib.Path, ceiling: int) -> None:
     A downstream "No such file or directory" from an over-long path is the
     opaque failure this replaces; the raised message carries the measured
     length, the ceiling and the tail of the path, so the next reader sees the
-    cause without reproducing the probe.
+    cause without reproducing the probe. A host that reaches the path through
+    its extended form has nothing to refuse here.
     """
+    if long_path_io_available():
+        return
     length = len(str(path))
     if length < ceiling:
         return
@@ -433,8 +501,15 @@ def _atomic_temp_name(name: str, *, parent_chars: int, ceiling: int) -> str:
             # in "." and produce "..tmp."; trim it so the signature stays legible.
             stem = name[:budget].rstrip(".") or name[:budget]
             return f".{stem}.tmp.{tail}"
-    # Even the narrowest grammar cannot fit beside this target: refuse with the
-    # measured facts rather than emit a name the OS will reject obscurely.
+    # Even the narrowest grammar cannot fit beside this target. On a host that
+    # reaches the path through its extended form, emit that grammar with a
+    # one-character stem: the stem is a readable label, never identity (a caller
+    # needing identity carries it as its own digest), so nothing is lost by
+    # yielding it. Where no extended form exists, the refusal still names the
+    # measured facts rather than an opaque OS code.
+    if long_path_io_available():
+        wide = f"{os.getpid():08d}.{threading.get_ident():022d}.{uuid.uuid4().hex[:8]}"
+        return f".{(name[:1] or 'x')}.tmp.{wide}"
     raise OSError(
         f"no atomic temp name fits under this host's {ceiling}-character path limit "
         f"beside a {len(name)}-character name in a {parent_chars}-character directory"
@@ -491,7 +566,7 @@ def _atomic_overwrite(path: pathlib.Path, write_temp: Callable[[pathlib.Path], N
     writer added is guarded by construction instead of by remembering (RES-14b)."""
     path = pathlib.Path(path)
     assert_test_data_path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    extended_io_path(path.parent).mkdir(parents=True, exist_ok=True)
     parent_chars = len(str(path.parent))
     if parent_chars + 1 + len(path.name) >= _PATH_CEILING_PROBE_TRIGGER:
         ceiling = ensure_path_ceiling_measured(path.parent)
@@ -500,19 +575,22 @@ def _atomic_overwrite(path: pathlib.Path, write_temp: Callable[[pathlib.Path], N
     _guard_path_length(path, ceiling)
     try:
         # 0o7777 keeps the special bits (setuid/setgid/sticky) too, not just rwx.
-        existing_mode = os.stat(path).st_mode & 0o7777
+        existing_mode = os.stat(extended_io_path(path)).st_mode & 0o7777
     except OSError:
         existing_mode = None  # new file -> keep the platform default
     tmp = path.with_name(_atomic_temp_name(path.name, parent_chars=parent_chars, ceiling=ceiling))
     try:
-        write_temp(tmp)
+        # The temp's PARENT may sit past the classic ceiling even though the name
+        # composer made room for the file, so the file I/O of both sides of the
+        # replace goes through the form this host can actually open.
+        write_temp(extended_io_path(tmp))
         if existing_mode is not None:
             with contextlib.suppress(OSError):
-                os.chmod(tmp, existing_mode)
+                os.chmod(extended_io_path(tmp), existing_mode)
         replace_atomic(tmp, path)
     except Exception:
         with contextlib.suppress(OSError):
-            tmp.unlink()
+            os.unlink(extended_io_path(tmp))
         raise
 
 

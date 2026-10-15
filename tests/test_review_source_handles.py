@@ -405,18 +405,37 @@ def test_response_capture_does_not_launder_nested_source_authority(tmp_path, mon
     assert not (artifacts.task_artifact_dir_path(parent, 'source') / unselected['path']).exists()
 
 
+def _normalized_io_path(path):
+    """The logical spelling of a path reached through either Windows form.
+
+    ``resolve`` keeps the ``\\\\?\\`` extended-length prefix when its input carried
+    one, so a deep handle recorded through the extended form would compare
+    unequal to the same file's logical spelling and slip the refusal below.
+    """
+    text = str(path)
+    if text.startswith('\\\\?\\UNC\\'):
+        return Path('\\\\' + text[8:])
+    if text.startswith('\\\\?\\'):
+        return Path(text[4:])
+    return Path(text)
+
+
 def _record_path_reads(monkeypatch, forbidden):
     """Record every pathlib open and refuse ``forbidden`` before its bytes are read.
 
     ``Path.open`` sits under ``read_bytes`` on every supported Python; patching
     ``io.open`` missed 3.10, whose pathlib accessor bound ``io.open`` at import.
-    Promotion turns the refusal into an unavailable ref, so the record, not the
-    raise, is the negative proof.
+    A handle past the classic ceiling is read through its extended-length
+    spelling, whose ``resolve`` carries the ``\\\\?\\`` prefix, so both sides are
+    normalized to one logical record: the refusal must catch a foreign read
+    through either spelling, never miss both. Promotion turns the refusal into
+    an unavailable ref, so the record, not the raise, is the negative proof.
     """
     opened, real_open = [], Path.open
+    forbidden = _normalized_io_path(forbidden)
 
     def guard(path, *args, **kwargs):
-        opened.append(path.resolve())
+        opened.append(_normalized_io_path(path.resolve()))
         assert opened[-1] != forbidden, 'foreign bytes read before confinement check'
         return real_open(path, *args, **kwargs)
 
@@ -482,7 +501,8 @@ def test_plan_dialogue_promotion_never_reads_a_foreign_source(tmp_path, monkeypa
     ref = artifacts.store_actor_source_bytes(child, 'sibling', category='context_checkpoints',
         source_id='plan-dialogue-1', data=b'SIBLING UNREAD', extension='jsonl')
     sibling_ref = json.loads(json.dumps(ref))
-    foreign = (artifacts.task_artifact_dir_path(child, 'sibling') / ref['path']).resolve()
+    foreign = _normalized_io_path(
+        (artifacts.task_artifact_dir_path(child, 'sibling') / ref['path']).resolve())
     if link:
         target = artifacts.task_artifact_dir_path(child, 'source') / ref['path']
         target.parent.mkdir(parents=True)

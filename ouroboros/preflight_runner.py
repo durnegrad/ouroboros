@@ -578,6 +578,13 @@ def _preflight_env(temp_root: pathlib.Path, repo_worktree: pathlib.Path, *, crea
 
     temp_root = pathlib.Path(temp_root).resolve(strict=False)
     env = isolated_environment(temp_root, repo_worktree, create=create)
+    # The hermetic gate measures the CODE, not this host's TEMP depth: without
+    # this pin conftest.py nests every pytest session root under %TEMP% (deep on
+    # a classic-profile Windows user profile), where the v7.6.8 name guards
+    # fire on paths the code itself never composes that deep. With it every
+    # pytest process claims a fresh SHORT sibling root, exactly as the safe
+    # local launcher (scripts/safe_test.py) already does.
+    env["OUROBOROS_TEST_TEMP_ROOT"] = str(temp_root)
     # PREPENDED, so `-p ouroboros_preflight_probe` resolves to the gate's own
     # worker-count plugin and not to anything the candidate tree or the
     # operator's PYTHONPATH happens to shadow it with.
