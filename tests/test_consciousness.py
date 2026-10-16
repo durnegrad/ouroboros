@@ -794,3 +794,53 @@ def test_finish_before_dispatch_budget_pause_is_not_done(clock):
     clock.clock._wake_finished("wake0001", True)
     assert clock.clock.status_snapshot()["last_wake_outcome"] == "paused"
     assert clock.clock._backoff == 1
+
+
+# --- Quiet hours (owner order 2026-10-13: no wakes 23:00-07:00 Europe/Moscow) ---
+
+def _moscow_ts(year, month, day, hour, minute=0):
+    """An epoch for a Europe/Moscow wall-clock instant, so the test states Moscow time
+    directly and never depends on the HOST's zone."""
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    return dt.datetime(year, month, day, hour, minute, tzinfo=ZoneInfo("Europe/Moscow")).timestamp()
+
+
+def test_quiet_window_boundaries_in_the_owner_zone():
+    from ouroboros.consciousness import quiet_window_end
+    # Outside the window: the whole working day, plus the minute before it opens.
+    assert quiet_window_end(_moscow_ts(2026, 10, 14, 22, 59)) is None
+    # 23:00 opens it, and it closes at TOMORROW's 07:00 — never this morning's.
+    assert quiet_window_end(_moscow_ts(2026, 10, 14, 23, 0)) == _moscow_ts(2026, 10, 15, 7, 0)
+    assert quiet_window_end(_moscow_ts(2026, 10, 14, 23, 59)) == _moscow_ts(2026, 10, 15, 7, 0)
+    # 06:59 is still inside; 07:00 is the window's end (outside, wake allowed).
+    assert quiet_window_end(_moscow_ts(2026, 10, 15, 6, 59)) == _moscow_ts(2026, 10, 15, 7, 0)
+    assert quiet_window_end(_moscow_ts(2026, 10, 15, 7, 0)) is None
+
+
+def test_quiet_window_is_moscow_on_a_utc_host():
+    """A host clock in UTC must close for the SAME Moscow hours. 20:00Z is 23:00 MSK."""
+    from ouroboros.consciousness import quiet_window_end
+    import datetime as dt
+    utc_2000 = dt.datetime(2026, 10, 14, 20, 0, tzinfo=dt.timezone.utc).timestamp()
+    utc_1959 = dt.datetime(2026, 10, 14, 19, 59, tzinfo=dt.timezone.utc).timestamp()
+    assert quiet_window_end(utc_2000) == _moscow_ts(2026, 10, 15, 7, 0)
+    assert quiet_window_end(utc_1959) is None  # 22:59 MSK — still awake
+
+
+def test_tick_skips_a_due_wake_inside_quiet_hours_and_retries_at_the_window_end(clock):
+    from ouroboros.consciousness import quiet_window_end
+    inside = _moscow_ts(2026, 10, 15, 2, 0)
+    clock.clock._next_wake_at = inside - 1  # the wake IS due
+    assert clock.clock.tick(inside) == "skipped:quiet_hours"
+    assert clock.clock.next_wake_at == quiet_window_end(inside)
+    assert not clock.launches  # nothing was started
+    # 07:00 MSK: the window is over and the same clock launches.
+    assert clock.clock.tick(_moscow_ts(2026, 10, 15, 7, 0)) == "launched"
+
+
+def test_tick_leaves_an_idle_tick_not_due_inside_quiet_hours(clock):
+    """The window only intercepts a wake that is DUE: an idle tick keeps its own outcome."""
+    inside = _moscow_ts(2026, 10, 15, 3, 0)
+    clock.clock._next_wake_at = inside + 10_000
+    assert clock.clock.tick(inside) == "not_due"

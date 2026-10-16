@@ -151,14 +151,25 @@ def test_repo_commit_results_never_truncated():
     assert _truncate_tool_result(big, "skill_review") == big
 
 
-def test_self_check_returns_bool_and_interval_15():
+def test_self_check_schedule_scales_with_the_round_budget():
     from ouroboros.loop import _maybe_inject_self_check
     messages = []
     usage = {"cost": 0}
     progress_calls = []
     assert _maybe_inject_self_check(14, 200, messages, usage, progress_calls.append) is False
-    assert _maybe_inject_self_check(15, 200, messages, usage, progress_calls.append) is True
-    assert "CHECKPOINT" in messages[0]["content"]
+    assert _maybe_inject_self_check(15, 200, messages, usage, progress_calls.append) is False
+    # Bounded: exactly two warnings, at ~50% and ~80% of the budget.
+    assert _maybe_inject_self_check(100, 200, messages, usage, progress_calls.append) is True
+    assert "CHECKPOINT 1" in messages[0]["content"]
+    assert "Rounds remaining: 100" in messages[0]["content"]
+    assert _maybe_inject_self_check(101, 200, messages, usage, progress_calls.append) is False
+    assert _maybe_inject_self_check(160, 200, messages, usage, progress_calls.append) is True
+    assert "CHECKPOINT 2" in messages[1]["content"]
+    assert "Rounds remaining: 40" in messages[1]["content"]
+    assert _maybe_inject_self_check(200, 200, messages, usage, progress_calls.append) is False
+    # Unbounded: the every-15th-round cadence is unchanged, with no remainder line.
+    assert _maybe_inject_self_check(15, None, messages, usage, progress_calls.append) is True
+    assert "Rounds remaining" not in messages[2]["content"]
 
 
 def test_advisory_pre_review_results_never_truncated():

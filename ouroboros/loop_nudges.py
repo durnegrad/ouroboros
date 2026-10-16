@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import pathlib
 import queue
 
@@ -181,11 +182,27 @@ def _maybe_inject_self_check(
     cost_ceiling: Optional["task_pacing.CostCeiling"] = None,
     llm_trace: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    """Inject a normal user-turn self-check and emit one checkpoint event. Without a round
-    limit (``max_rounds is None``) it names the rounds used and no invented remainder."""
+    """Inject a normal user-turn self-check and emit one checkpoint event.
+
+    Schedule (owner 2026-10-13): a BOUNDED task warns at ~50% and ~80% of its
+    round budget — a fixed interval cannot warn inside a short budget, because
+    the terminal round is never a checkpoint (the old 15-round interval on a
+    15-round budget fired zero times). Without a round limit (``max_rounds is
+    None``) the every-15th-round cadence is kept, naming the rounds used and
+    no invented remainder."""
     REMINDER_INTERVAL = 15
-    if (round_idx <= 1 or round_idx % REMINDER_INTERVAL != 0
-            or (max_rounds is not None and round_idx >= max_rounds)):
+
+    def _budget_warning_rounds(limit: Optional[int]) -> Optional[set]:
+        if limit is None:
+            return None
+        candidates = {math.ceil(limit * fraction) for fraction in (0.5, 0.8)}
+        return {r for r in candidates if 1 < r < limit}
+
+    warn_rounds = _budget_warning_rounds(max_rounds)
+    if warn_rounds is not None:
+        if round_idx not in warn_rounds:
+            return False
+    elif round_idx <= 1 or round_idx % REMINDER_INTERVAL != 0:
         return False
     # Non-incrementing round re-entries (e.g. free redials): one self-check per round.
     if accumulated_usage.get("_self_check_round") == round_idx:
@@ -199,7 +216,11 @@ def _maybe_inject_self_check(
     raw_task_cost = accumulated_usage.get("cost")
     task_cost = float(raw_task_cost) if raw_task_cost is not None else None
     cost_text = f"${task_cost:.2f}" if task_cost is not None else "unknown"
-    checkpoint_num = round_idx // REMINDER_INTERVAL
+    # Sequential numbering across both schedules: a bounded task fires its two
+    # budget warnings as checkpoints 1 and 2; the unbounded cadence keeps the
+    # historical numbering (round 15 -> 1, 30 -> 2, ...).
+    checkpoint_num = int(accumulated_usage.get("_self_check_count") or 0) + 1
+    accumulated_usage["_self_check_count"] = checkpoint_num
 
     # Tree spend under a root cap (v6.91): the checkpoint is already a
     # cache-breaking user turn — one of the RARE surfaces allowed a live

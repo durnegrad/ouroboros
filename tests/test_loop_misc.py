@@ -141,9 +141,20 @@ def test_maybe_inject_self_check_handles_assistant_none_content():
     ]
     progress = []
 
-    injected = _maybe_inject_self_check(
+    # Budget 40 -> warnings at ceil(40*0.5)=20 and ceil(40*0.8)=32. Round 15 is NOT a
+    # checkpoint under the budget-scaled schedule, so this case cannot pass by the
+    # coincidence that ceil(30*0.5)==15 (it did when the budget was 30).
+    assert _maybe_inject_self_check(
         15,
-        30,
+        40,
+        messages,
+        {"cost": 0.0},
+        progress.append,
+    ) is False
+
+    injected = _maybe_inject_self_check(
+        20,
+        40,
         messages,
         {"cost": 0.0},
         progress.append,
@@ -152,6 +163,7 @@ def test_maybe_inject_self_check_handles_assistant_none_content():
     assert injected is True
     assert messages[-1]["role"] == "user"
     assert "[CHECKPOINT 1" in messages[-1]["content"]
+    assert "round 20/40]" in messages[-1]["content"]
     assert progress
 
 

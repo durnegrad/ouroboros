@@ -184,9 +184,16 @@ def test_self_check_without_a_round_limit_invents_no_remainder():
     assert _maybe_inject_self_check(15, None, unbounded, {"cost": 0.0}, progress.append) is True
     text = unbounded[-1]["content"]
     assert "[CHECKPOINT 1 — round 15]" in text and "Rounds remaining" not in text
-    assert _maybe_inject_self_check(15, 200, bounded, {"cost": 0.0}, progress.append) is True
-    assert "round 15/200]" in bounded[-1]["content"]
-    assert "| Rounds remaining: 185" in bounded[-1]["content"]
+    # Bounded (owner 2026-10-13): the schedule scales with the budget — two
+    # warnings at ~50% and ~80%, never at the terminal round.
+    assert _maybe_inject_self_check(15, 20, bounded, {"cost": 0.0}, progress.append) is False
+    assert _maybe_inject_self_check(10, 20, bounded, {"cost": 0.0}, progress.append) is True
+    assert "round 10/20]" in bounded[-1]["content"]
+    assert "| Rounds remaining: 10" in bounded[-1]["content"]
+    assert _maybe_inject_self_check(16, 20, bounded, {"cost": 0.0}, progress.append) is True
+    assert "round 16/20]" in bounded[-1]["content"]
+    assert "| Rounds remaining: 4" in bounded[-1]["content"]
+    assert _maybe_inject_self_check(20, 20, bounded, {"cost": 0.0}, progress.append) is False
 
 
 def test_model_wait_has_no_execution_window_or_ceiling_stop_without_a_lifetime(tmp_path, monkeypatch):

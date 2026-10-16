@@ -7,7 +7,11 @@ the clock — WHEN such a turn starts and what to say about it afterwards. No th
 registry, no observation inbox, no pause/resume: the supervisor loop calls ``tick(now)`` once
 per pass and the ``DirectActivityRegistry`` (the census of live direct turns) is the only
 liveness truth. Tick order, each step a typed outcome: disabled → a live wake → a live owner
-turn → not yet due → the rolling-24h allowance (an unreadable ledger is the disclosed skip
+turn → not yet due → the owner's quiet window (``quiet_window_end``: 23:00–07:00 in
+``QUIET_HOURS_OWNER_TZ`` skips a DUE WAKE to the window's end — owner order 2026-10-13. It
+gates THIS alarm only: scheduled tasks, Presence/companion cycles, running task trees and
+evolution are not consulted here and keep running through the night, and owner-message turns
+are never touched) → the rolling-24h allowance (an unreadable ledger is the disclosed skip
 ``allowance_unknown``, never a silent block; a remainder at or below the graceful stop's planning
 margin counts as exhausted — less than one planned turn) → an owner chat must be bound → launch.
 What is left of that allowance is the launched tree's graceful ceiling
@@ -42,6 +46,7 @@ import pathlib
 import threading
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from ouroboros.config import (
     WAKE_DEFAULT_SEC,
@@ -67,6 +72,9 @@ OBSERVATION_STATE_KEY = "consciousness_observation_boundary"  # chat position + 
 OBSERVATION_BOOTSTRAP_STATE_KEY = "consciousness_observation_bootstrap_since"
 LEGACY_INBOX_REL = pathlib.Path("state") / "consciousness_observations.jsonl"
 ARCHIVED_INBOX_REL = pathlib.Path("archive") / "consciousness_observations.jsonl"
+QUIET_HOURS_OWNER_TZ = "Europe/Moscow"  # the OWNER'S DECLARED zone for this install (owner order 2026-10-13): a literal, deliberately not a per-visitor lookup, so every machine in this install closes for the same declared local night
+QUIET_HOURS_START = 23  # local hour, inclusive
+QUIET_HOURS_END = 7  # local hour, exclusive: the window's end IS the next allowed instant
 HEARTBEAT = "heartbeat"
 ALLOWANCE_VIEW_TTL_SEC = 60.0
 SNAPSHOT_KEYS = ("enabled", "level", "next_wake_at", "pending_reason", "last_wake_at", "last_wake_task_id",
@@ -94,6 +102,29 @@ def panic_blocks_wake(drive_root: Any) -> bool:
         return True
     except OSError:
         return True
+
+
+def quiet_window_end(now: float) -> Optional[float]:
+    """The instant the owner's quiet window ends, or ``None`` when ``now`` is outside it.
+
+    Owner order 2026-10-13: no background WAKES 23:00-07:00 in the owner's declared zone
+    (``QUIET_HOURS_OWNER_TZ``). This gates the ALARM's own wake start and nothing else:
+    scheduled tasks, Presence and companion cycles, running task trees and evolution are
+    not consulted here and keep running through the window, and owner-message turns are
+    never touched. The zone is a declared per-install constant rather than a per-visitor
+    lookup, so a host in any machine zone closes for the SAME declared local hours. An
+    unavailable zone database returns ``None``: an unknown zone never invents a window."""
+    try:
+        local = _dt.datetime.fromtimestamp(float(now), tz=ZoneInfo(QUIET_HOURS_OWNER_TZ))
+    except Exception:
+        log.debug("consciousness: quiet-hours zone unavailable; the window is not applied", exc_info=True)
+        return None
+    if not (local.hour >= QUIET_HOURS_START or local.hour < QUIET_HOURS_END):
+        return None
+    end = local.replace(hour=QUIET_HOURS_END, minute=0, second=0, microsecond=0)
+    if local.hour >= QUIET_HOURS_START:  # 23:xx closes on TOMORROW's 07:00, not this morning's
+        end += _dt.timedelta(days=1)
+    return end.timestamp()
 
 
 class BackgroundConsciousness:
@@ -245,6 +276,12 @@ class BackgroundConsciousness:
                 return "wake_live" if wake else "owner_turn_live"
             if now < self._next_wake_at:
                 return "not_due"
+            # Owner 2026-10-13: no background wakes during his local night. Checked once a
+            # wake is actually DUE (an idle tick stays "not_due"), before the allowance read
+            # so a night never churns through allowance skips inside the window.
+            quiet_until = quiet_window_end(now)
+            if quiet_until is not None:
+                return self._skip("quiet_hours", quiet_until, now=now)
             window = self._allowance_view(now, fresh=True)
             if window.get("status") == STATUS_UNKNOWN:
                 return self._skip("allowance_unknown", now + self.floor, now=now, error=str(window.get("error") or ""))
