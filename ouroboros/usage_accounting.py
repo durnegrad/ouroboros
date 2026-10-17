@@ -690,17 +690,9 @@ def _global_limit(request: AttemptRequest) -> float:
     return float("inf") if configured is None else max(0.0, configured)
 
 
-_CANDIDATE_ROW_FIELDS = (
-    "candidate_raw_sha256", "candidate_raw_size_bytes", "candidate_context_sha256",
-    "candidate_context_size_bytes", "candidate_measurement_kind", "physical_context",
-    "candidate_manifest_ref",
-    "processing_preference", "submitted_processing_mode", "processing_basis",
-    "effort",
-)
-
-
 def _check_dispatch_fences(scope: UsageScope, root: pathlib.Path) -> None:
     from ouroboros.budget_pause import dispatch_fenced
+    from ouroboros.utils import read_text_across_replace
 
     if dispatch_fenced(scope.task_id):
         # Process-local pause fence: no NEW send (loop, tool, reviewer, verdict
@@ -709,42 +701,49 @@ def _check_dispatch_fences(scope: UsageScope, root: pathlib.Path) -> None:
             f"model dispatch fenced: task {scope.task_id} is entering an exact budget pause",
             limit_scope="pausing", root_task_id=scope.root_task_id)
     # The queue's atomic durable root-dispatch fence, read from its snapshot:
-    # a fenced root refuses every send until an explicit resume.
+    # a fenced root refuses every send until an explicit resume. That snapshot is
+    # rewritten every tick (os.replace), so a reader landing in the window gets
+    # PermissionError although both versions are intact; read_text_across_replace
+    # retries ONLY that transient. Still unreadable is no authority for this
+    # send, not evidence of a fence -- treat it as NO fence, exactly as the
+    # missing-file guard below already does, and disclose it: a ~30 ms file lock
+    # must never become an unretryable stop that kills the task.
     root_task_id = str(scope.root_task_id or "").strip()
     snapshot_path = root / "state" / "queue_snapshot.json"
     if root_task_id and snapshot_path.exists():
         try:
-            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            snapshot = json.loads(read_text_across_replace(snapshot_path))
         except Exception as exc:
-            raise UsageAccountingError(f"root budget fence authority unavailable: {snapshot_path}") from exc
-        rows = snapshot.get("budget_root_fences", []) if isinstance(snapshot, dict) else None
-        if not isinstance(rows, list):
-            raise UsageAccountingError(f"invalid root budget fence authority: {snapshot_path}")
-        for row in rows:
-            if not isinstance(row, dict):
-                raise UsageAccountingError(f"invalid root budget fence row: {snapshot_path}")
-            if (str(row.get("root_task_id") or "") != root_task_id or row.get("cause") == "owner_pause"
-                    or str(row.get("status") or "") not in {"active", "paused"}):
-                continue  # an owner Pause gates launches itself (owner_pause.py): never a money stop
-            # ONE member explicitly selected against THIS fence generation is
-            # admitted (owner Q9, #1196): the queue recorded that selection on
-            # the row itself, and the latch still refuses every unselected member.
-            fence_id = str(row.get("fence_id") or "")
-            selected = False
-            for bucket in ("running", "pending"):
-                for entry in (snapshot.get(bucket) or []) if isinstance(snapshot, dict) else []:
-                    member = entry.get("task") if isinstance(entry, dict) else None
-                    if not isinstance(member, dict) or str(member.get("id") or "") != scope.task_id:
-                        continue
-                    hold = member.get("_budget_pause_hold")
-                    selected = bool(fence_id and isinstance(hold, dict) and hold.get("selected")
-                                    and str(hold.get("fence_id") or "") == fence_id)
-            if not selected:
-                raise BudgetExceeded(
-                    f"root model dispatch paused pending explicit resume for {scope.root_task_id}",
-                    limit_scope="root",
-                    root_task_id=scope.root_task_id,
-                )
+            log.warning("root budget fence snapshot unreadable; treating as no fence: %s (%s)",
+                        snapshot_path, exc)
+        else:
+            rows = snapshot.get("budget_root_fences", []) if isinstance(snapshot, dict) else None
+            if not isinstance(rows, list):
+                raise UsageAccountingError(f"invalid root budget fence authority: {snapshot_path}")
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise UsageAccountingError(f"invalid root budget fence row: {snapshot_path}")
+                if (str(row.get("root_task_id") or "") != root_task_id or row.get("cause") == "owner_pause"
+                        or str(row.get("status") or "") not in {"active", "paused"}):
+                    continue  # an owner Pause gates launches itself (owner_pause.py): never a money stop
+                # ONE member selected against THIS fence generation is admitted
+                # (owner Q9, #1196); every unselected member stays fenced.
+                fence_id = str(row.get("fence_id") or "")
+                selected = False
+                for bucket in ("running", "pending"):
+                    for entry in (snapshot.get(bucket) or []) if isinstance(snapshot, dict) else []:
+                        member = entry.get("task") if isinstance(entry, dict) else None
+                        if not isinstance(member, dict) or str(member.get("id") or "") != scope.task_id:
+                            continue
+                        hold = member.get("_budget_pause_hold")
+                        selected = bool(fence_id and isinstance(hold, dict) and hold.get("selected")
+                                        and str(hold.get("fence_id") or "") == fence_id)
+                if not selected:
+                    raise BudgetExceeded(
+                        f"root model dispatch paused pending explicit resume for {scope.root_task_id}",
+                        limit_scope="root",
+                        root_task_id=scope.root_task_id,
+                    )
 
 
 def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
