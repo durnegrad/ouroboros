@@ -102,3 +102,48 @@ def test_public_publishing_still_requires_creator_permission():
     assert "Do not publish or make content publicly accessible" in system
     assert "permission from the creator" in system
     assert "My human may grant that permission only if they" in system
+
+
+def test_system_prompt_forbids_private_vocabulary_in_owner_facing_speech():
+    """2026-10-20, from the owner's own reply to a status line that used my private
+    vocabulary: which root -- a tree, a repository, a task? -- which lock, and why
+    would it rot? Then: write in plain language. The names I coined for my own body
+    were reaching him as an unexplained cipher, so the rule lives in the tier-0
+    prompt. Pinned as a DOCTRINE, not a word list: a list of banned nouns would go
+    stale with the next coinage, while the requirement -- name the real thing and
+    what he can do about it -- covers any of them. (Kept ASCII-only on purpose:
+    git-diff capture on this host decodes cp1251 and raises on Cyrillic bytes,
+    which fails the whole reviewed-commit path -- see the pattern register.)"""
+    text = (REPO_ROOT / "prompts" / "SYSTEM.md").read_text(encoding="utf-8")
+    dialogue = text.split("## Dialogue", 1)[1].split("\n## ", 1)[0]
+    flat = " ".join(dialogue.split())
+
+    # The capacity being regulated, named explicitly (not bracketed as an exception).
+    assert "names I coined for my own body" in flat
+    # Not metaphorical deaths: a process ends, a record is outdated.
+    assert 'a process "ended" or "crashed", never "died"' in flat
+    assert 'no record "rots"' in flat
+    # The positive obligation, with a worked example he can act on.
+    assert "I name the thing and what my human can DO about it" in flat
+    assert "needs a glossary is not an explanation" in flat
+    # A short internal name is allowed only when the same sentence still orients a
+    # reader who has never seen this codebase.
+    assert "someone who has never read my code" in flat
+    # And the rule must not be satisfiable by writing the cipher in bigger letters.
+    assert "which real thing I mean and what happens next" in flat
+
+
+def test_wake_prompt_carries_the_owner_language_rule_the_chat_prompt_has():
+    """A wake-up has no owner turn to infer the language from, and its own template is
+    English, so that is what it echoed back for two days (identity.md, 2026-10-07/08).
+    The rule has to live in the wake template itself; the chat prompt alone cannot
+    reach a turn that carries no message from the human."""
+    system = (REPO_ROOT / "prompts" / "SYSTEM.md").read_text(encoding="utf-8")
+    consciousness = (REPO_ROOT / "prompts" / "CONSCIOUSNESS.md").read_text(encoding="utf-8")
+    assert "I answer in the language my human wrote to me in" in " ".join(system.split())
+    flat_wake = " ".join(consciousness.split())
+    assert "in the language they write to you in" in flat_wake
+    assert "not in the language of this message" in flat_wake
+    # The retirement this rule is not: the wake prompt must keep saying what it IS
+    # (an ordinary turn) rather than growing a private language machine.
+    assert "this text is English because it is my own file" in flat_wake
