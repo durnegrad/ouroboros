@@ -471,7 +471,7 @@ def _breakdown_bucket(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
 
 _SKILL_ATTEMPT_FIELDS = (
     "attempt_id", "review_slot_id", "kind", "state", "model", "provider", "source",
-    "cost_usd", "cost_final", "reservation_upper_bound_usd", "pricing_known",
+    "cost_usd", "cost_final", "reservation_upper_bound_usd", "pricing_known", "cost_basis",
     "prompt_tokens", "completion_tokens", "cached_tokens", "subscription_route",
     "subscription_reset_at", "credential_profile_id", "access_profile",
     "effort", "effort_resolution", "processing", "processing_basis", "cost_evidence", "attempt_execution",

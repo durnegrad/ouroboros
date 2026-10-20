@@ -246,8 +246,8 @@ class _LedgerWriterView:
     def summary(self, root_task_id: str | None = None, *, billing_group_id=None) -> dict:
         return render_cash(self.totals(root_task_id, billing_group_id))
 
-    def exceeds_limit(self, limit, bound=None, *, root_task_id=None, billing_group_id=None, dispatch=False):
-        return exceeds_limit(self.totals(root_task_id, billing_group_id), limit, bound, dispatch=dispatch)
+    def exceeds_limit(self, limit, bound=None, *, root_task_id=None, billing_group_id=None, dispatch=False, basis="full"):
+        return exceeds_limit(self.totals(root_task_id, billing_group_id), limit, bound, dispatch=dispatch, basis=basis)
 
     def append(self, root: pathlib.Path, rows: list) -> list:
         ua = _ua()

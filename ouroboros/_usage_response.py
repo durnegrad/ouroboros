@@ -235,4 +235,11 @@ def usage_from_response(response: Any) -> Tuple[Dict[str, Any], Optional[float],
         getattr(response, "total_cost_usd", None),
     )
     cost = next((number for value in candidates if (number := _number(value)) is not None), None)
-    return normalized, cost, cost is not None
+    # A route fills `cost` from a fallback ESTIMATE and marks it `cost_estimated`
+    # (see the adapters' own `cost_final = cost is not None and not cost_estimated`);
+    # the provider never stood behind that number, so it is not a settled charge. The
+    # two-tier money rule (owner decision 2026-10-15) is exactly this distinction:
+    # an estimate lands in `estimated_usd` and may not refuse a dispatch, while a
+    # provider-reported cost stays final and does. Deriving `final` from the presence
+    # of a cost alone silently made every estimate a confirmed charge.
+    return normalized, cost, cost is not None and not normalized.get("cost_estimated")

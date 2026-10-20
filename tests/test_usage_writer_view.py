@@ -402,6 +402,49 @@ def test_exact_near_cap_admission_keeps_six_places_and_nanodollar_allowance():
                              "10000000000000000000000000000.000001", dispatch=True)
 
 
+def test_hard_basis_refuses_only_on_provable_money_and_an_estimate_only_warns():
+    """v7.6.12 two-tier admission: only provable spend may halt a task.
+
+    Owner decision 2026-10-15: an ESTIMATE warns, it never refuses; the gate's
+    official figure is its own charge log, the catalog number is an estimate.
+    The kernel keeps the conservative "full" default; EVERY admission point
+    passes ``basis="hard"`` explicitly -- reserve_attempt's global and root
+    seams, the pre-dispatch re-check (usage_accounting), and the billing-group
+    axis (usage_admission.raise_group_refusal) -- so an implicit caller can
+    never silently inherit the lenient basis.
+    """
+    from ouroboros._usage_money import exceeds_limit
+
+    def cash(settled="0", confirmed="0", estimated="0", reserved="0", unresolved="0"):
+        return tuple(Decimal(value) for value in
+                     (settled, confirmed, estimated, reserved, unresolved))
+
+    cap = "10"
+    # The DISCRIMINATING case: over the cap as total exposure, but the only money
+    # behind it is a settled ESTIMATE. The two bases disagree here on purpose --
+    # a test whose input satisfies both would prove neither. Admission passes
+    # basis="hard" explicitly (usage_accounting.reserve_attempt), so the kernel's
+    # own default stays "full" for every other caller.
+    estimate_only = cash(settled="75", estimated="75")
+    assert not exceeds_limit(estimate_only, cap, basis="hard")
+    assert exceeds_limit(estimate_only, cap)                # default = full exposure
+
+    # Provable money keeps refusing exactly as before, under the admission basis:
+    # confirmed (the provider stood behind it), reserved (an active hold for a send
+    # that is definitely happening), unresolved (what an unanswered attempt may cost).
+    assert exceeds_limit(cash(settled="75", confirmed="75"), cap, basis="hard")
+    assert exceeds_limit(cash(reserved="75"), cap, basis="hard")
+    assert exceeds_limit(cash(unresolved="75"), cap, basis="hard")
+
+    # The prospective half of admission stays live: a bound pushes an otherwise
+    # admissible send over the cap, under the hard basis too.
+    assert exceeds_limit(cash("0"), cap, "75", basis="hard")
+    assert not exceeds_limit(cash("0"), cap, "5", basis="hard")
+
+    # A non-positive cap is refused in both bases (0 == 0 against every bucket).
+    assert exceeds_limit(estimate_only, "0", basis="hard")
+
+
 def test_preparation_changed_retries_outside_lock_and_numeric_metadata_keeps_shape(root, monkeypatch):
     seed(root, 1)
     original = memo._prepare_writer
@@ -658,14 +701,37 @@ def test_legacy_monetary_scalars_match_replay_and_admission(root, value, exact, 
         exact, exact if state == "settled" else 0, exact if state == "estimated" else 0, 0, 0)
     assert_legacy_cash(root, {"dominant": (".25", ".25", 0, 0, 0), "legacy": cash})
     assert path.read_bytes() == before
-    # Fresh global AND root admission must count the accepted historical amount.
+    # Two-tier admission (owner decision 2026-10-15): only PROVABLE money may refuse a
+    # send. `state` picks which bucket carries the accepted historical amount --
+    # reserved_usd, and settled+final -> confirmed_usd, are provable; a settled amount
+    # this route could only ESTIMATE lands in estimated_usd, which is precisely the
+    # unprovable one. So the two halves are asserted differently.
     cap = float(exact) + .05
     for axis, limits in (("global", {"global_limit_usd": cap + .25}),
                          ("root", {"root_limit_usd": cap})):
+        if state == "estimated":
+            continue
+        # The bond carries this call over the cap, so a refusal proves the provable
+        # amount is IN the refusal sum. Unchanged pre-7.6.12 behaviour.
         with pytest.raises(ua.BudgetExceeded) as error:
             ua.reserve_attempt(request(root, root_task_id="legacy", reservation_usd=.1, **limits))
         assert error.value.limit_scope == axis
         assert path.read_bytes() == before
+    if state == "estimated":
+        # The cap sits AT the settled estimate with a negligible bond, so the estimate
+        # alone would refuse under the pre-7.6.12 "full" basis; under the two-tier basis
+        # the call is admitted. A zero estimate leaves a zero cap, which the kernel
+        # refuses on its own account (cap <= 0 means no allowance) in every basis --
+        # that corner stays a refusal and is asserted as one.
+        firm = float(exact)
+        for limits in ({"root_limit_usd": firm}, {"global_limit_usd": firm + .25}):
+            if firm <= 0:
+                with pytest.raises(ua.BudgetExceeded):
+                    ua.reserve_attempt(request(root, root_task_id="legacy", reservation_usd=1e-7, **limits))
+                assert path.read_bytes() == before
+            else:
+                ua.release_attempt(ua.reserve_attempt(
+                    request(root, root_task_id="legacy", reservation_usd=1e-7, **limits)))
     fits = ua.reserve_attempt(request(root, root_task_id="legacy", reservation_usd=.01,
                                       root_limit_usd=cap, global_limit_usd=cap + .25))
     ua.release_attempt(fits)

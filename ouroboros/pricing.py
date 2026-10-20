@@ -54,6 +54,13 @@ def _pricing_ttl_sec() -> float:
 
 
 def _fetch_live_rows(provider: str, model: str = "") -> Dict[str, Tuple[Optional[float], ...]]:
+    if provider == "openai-compatible":
+        # Whole-catalog read: a new-api gate publishes one tariff table, not a
+        # per-model endpoint, so the model-scoped branch below stays OpenRouter-only.
+        from ouroboros.llm_pricing import fetch_openai_compatible_pricing
+
+        base_url = str(runtime_setting("OPENAI_COMPATIBLE_BASE_URL", "") or "").strip()
+        return fetch_openai_compatible_pricing(base_url=base_url, timeout_sec=5.0) if base_url else {}
     if provider == "openrouter":
         if model:
             from ouroboros.llm_pricing import fetch_openrouter_endpoint_pricing
@@ -71,17 +78,26 @@ def get_pricing(
 ) -> Dict[str, Tuple[Optional[float], ...]]:
     """Return pricing from the exact provider route's live catalog.
 
-    Direct/OpenAI-compatible/GigaChat routes have no automatic catalog here and
-    therefore return an empty mapping. A cold/expired fetch is bounded to five
-    seconds; failures expose unknown pricing rather than a fabricated fallback.
+    The direct openai-compatible route reads its gate's published tariff catalog
+    (see ``fetch_openai_compatible_pricing``); that row set is an ALTERNATIVE
+    estimate for a route that reports no per-call cost, and a missing row stays
+    unknown rather than a fabricated fallback. GigaChat has no automatic catalog
+    here and returns an empty mapping. A cold/expired fetch is bounded to five
+    seconds.
     An exact OpenRouter model selects its endpoint-tagged tariff catalog lazily,
     sharing this cache's TTL and in-flight owner. It never fetches all endpoints.
     """
     provider = str(provider or "").strip().lower()
-    if provider not in {"openrouter", "cloudru"} or (model and provider != "openrouter"):
+    if provider not in {"openrouter", "cloudru", "openai-compatible"} or (model and provider != "openrouter"):
         return {}
     model = normalize_model_identity(model) if model else ""
-    key = (provider, model) if model else provider
+    # WHICH gate a table came from belongs to the key: an owner who switches
+    # OPENAI_COMPATIBLE_BASE_URL must not settle the new gate's calls against the
+    # previous gate's coefficients for the rest of the TTL.
+    identity = provider
+    if provider == "openai-compatible":
+        identity = f"{provider}::{str(runtime_setting('OPENAI_COMPATIBLE_BASE_URL', '') or '').strip()}"
+    key = (identity, model) if model else identity
     with _pricing_lock:
         cached = dict(_cached_pricing.get(key, {}))
         fresh = bool(_pricing_fetched_at.get(key)) and (

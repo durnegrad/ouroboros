@@ -178,9 +178,19 @@ def test_cloudru_catalog_uses_exact_model_and_explicit_fx(monkeypatch):
     assert rows["cloudru/vendor/new-model"] == (1.0, None, None, 5.0)
 
 
-@pytest.mark.parametrize("provider", ["openai", "openai-compatible", "gigachat", "anthropic"])
+@pytest.mark.parametrize("provider", ["openai", "gigachat", "anthropic"])
 def test_routes_without_automatic_catalog_return_empty(provider):
+    # openai-compatible is deliberately NOT here: since v7.6.12 that route reads
+    # its gate's published tariff catalog (tests/test_openai_compatible_pricing.py
+    # keeps the no-base-url case, where it still answers empty).
     assert get_pricing(provider=provider) == {}
+
+
+def test_openai_compatible_without_a_base_url_has_no_catalog(monkeypatch):
+    monkeypatch.delenv("OPENAI_COMPATIBLE_BASE_URL", raising=False)
+    with patch("requests.get") as request:
+        assert get_pricing(provider="openai-compatible") == {}
+    request.assert_not_called()
 
 
 def test_nullable_usage_event_does_not_label_unknown_as_estimated():

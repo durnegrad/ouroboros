@@ -127,10 +127,32 @@ def render_cash(total: tuple) -> dict:
     return dict(zip((*CASH_KEYS, "accounted_usd"), map(float, rounded_cash(total))))
 
 
-def exceeds_limit(total: tuple, limit, bound=None, *, dispatch=False) -> bool:
-    """Admission uses rounded buckets and the existing nanodollar allowance."""
+def exceeds_limit(total: tuple, limit, bound=None, *, dispatch=False, basis="full") -> bool:
+    """Admission uses rounded buckets and the existing nanodollar allowance.
+
+    ``basis`` selects WHICH money may REFUSE a dispatch. It defaults to
+    ``"full"`` - every accounted bucket, the pre-v7.6.12 behaviour - so this
+    kernel keeps its existing contract for every caller; the ADMISSION points
+    that must obey the owner's two-tier rule (only provable spend may halt a
+    task; an estimate warns instead, decision 2026-10-15) pass ``"hard"``
+    explicitly.
+
+    - ``"hard"``: ``confirmed + reserved + unresolved``. Confirmed is settled
+      money the provider stood behind; reserved is an active hold for a send
+      already admitted; unresolved is what a dispatched-but-unanswered attempt
+      may still cost. A settled amount this route could only ESTIMATE
+      (``estimated_usd``, e.g. derived from a published tariff catalog) stops
+      refusing dispatch. That is the intended direction - such an amount is
+      exactly the unprovable one - and it is why a legacy settled row whose
+      ``cost_final`` is not truthy no longer halts a task.
+    - ``"full"``: unchanged exposure semantics for callers reasoning about
+      total spend rather than admission.
+    """
     with exact_money():
-        cap, spent, allowance = decimal_of(limit), rounded_cash(total)[-1], Decimal("1e-9")
+        cap, allowance = decimal_of(limit), Decimal("1e-9")
+        rounded = rounded_cash(total)
+        spent = (rounded[1] + rounded[3] + rounded[4]
+                 if basis == "hard" and len(total) == len(CASH_KEYS) else rounded[-1])
         return cap <= 0 or (spent > cap + allowance if dispatch else
                             spent >= cap - allowance or
                             bound is not None and spent + decimal_of(bound) > cap + allowance)

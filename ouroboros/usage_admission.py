@@ -254,7 +254,7 @@ def raise_group_refusal(view: Any, scope: Any, bound: Optional[float] = None, *,
     if not group or limit is None:
         return
     accounted = view.summary(billing_group_id=group)["accounted_usd"]
-    if view.exceeds_limit(limit, bound, billing_group_id=group, dispatch=dispatch):
+    if view.exceeds_limit(limit, bound, billing_group_id=group, dispatch=dispatch, basis="hard"):
         raise ua.BudgetExceeded(
             f"whole-work budget exhausted for group {group}: accounted=${accounted:.6f}, limit=${limit:.6f}",
             limit_scope="root", root_task_id=str(getattr(scope, "root_task_id", "") or group))

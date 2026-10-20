@@ -587,6 +587,13 @@ class _OpenAICompatibleLaneMixin:
             if estimated_cost is not None:
                 usage["cost"] = estimated_cost
                 usage["cost_estimated"] = True
+                # Where this number came from, so it can never be read as a settled
+                # charge. Only a route with a published tariff catalog reaches here;
+                # a provider-settled cost leaves the label absent (see the direct
+                # route's own cost field handling above).
+                from ouroboros.cost_projection import COST_BASIS_CATALOG
+
+                usage["cost_basis"] = COST_BASIS_CATALOG
         if usage.get("cost") is None:
             usage["cost"] = None
         usage["cost_final"] = bool(

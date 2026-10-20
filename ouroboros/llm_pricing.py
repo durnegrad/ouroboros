@@ -11,6 +11,7 @@ no cost.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -296,6 +297,118 @@ def fetch_cloudru_pricing(*, timeout_sec: float = 5.0) -> Dict[str, Tuple[Option
     except (requests.RequestException, ValueError, KeyError) as e:
         log.warning(f"Failed to fetch cloud.ru pricing: {e}")
         return {}
+
+
+# A new-api gate publishes one shared ``model_ratio`` of 37.5 on the rows whose
+# model carries no explicit price. That is the panel's default coefficient, not a
+# tariff, so such a row stays ABSENT (unknown) exactly like a free or per-image row.
+_GATE_RATIO_SENTINEL = 37.5
+
+
+def _gate_dash_alias(name: str) -> str:
+    """The dashed spelling of a dotted catalog name (``v4.1`` -> ``v4-1``).
+
+    The gate serves both spellings as the SAME model (live probes 2026-10-12: a
+    dashed id answered 200 and the gate echoed the canonical dotted name), but its
+    catalog publishes only the dotted form, so a configured dashed route would
+    otherwise estimate unknown forever. Applied only where the dashed spelling is
+    not itself a catalog row, so an alias can never shadow a real tariff.
+    """
+    return re.sub(r"(?<=\d)\.(?=\d)", "-", name)
+
+
+def fetch_openai_compatible_pricing(
+    *, base_url: str, timeout_sec: float = 5.0,
+) -> Dict[str, Tuple[Optional[float], ...]]:
+    """Read a new-api gate's published tariff catalog as ``openai-compatible/<model>``.
+
+    This route reports NO cost in its chat responses, so a provider-settled figure
+    is impossible here by construction: the catalog is an ALTERNATIVE estimate, and
+    every consumer must keep it visibly distinct from a settled charge (the
+    ``cost_basis`` label on the usage row is where that distinction travels).
+
+    Both facts come from the same host, and BASE_PRICE is DERIVED from the gate's
+    own constant rather than hardcoded, so a change on the gate's side cannot
+    silently stale the estimate:
+
+    - ``/api/status`` -> ``quota_per_unit`` (``BASE_PRICE = 1e6 / quota_per_unit``)
+    - ``/api/pricing`` -> new-api coefficients (``model_ratio``, ``completion_ratio``)
+
+    A row is admitted only as an ordinary per-token ratio row (``quota_type == 0``)
+    with a positive ratio and completion multiplier. The 37.5 default sentinel, free
+    rows (ratio 0) and per-image rows stay ABSENT, which the caller reads as unknown
+    rather than ``$0``.
+
+    Tuples are ``(input, cached_read, cache_write, output)`` per 1M USD. This gate
+    applies NO cache discount to these models (measured: two identical 21,635-token
+    calls 8s apart each billed the full rate), so the cached and write tiers equal
+    the input tier. That is deliberate, not an assumption: leaving them ``None``
+    makes ``pricing._cost_from_pricing`` return unknown for every cache-hit call,
+    and this install runs a high cache-hit rate.
+    """
+    root = str(base_url or "").strip().rstrip("/")
+    if not root:
+        return {}
+    if root.endswith("/v1"):
+        root = root[:-3]
+    bound = max(0.1, min(5.0, float(timeout_sec)))
+    try:
+        import requests
+    except ImportError:
+        return {}
+    try:
+        status = requests.get(
+            f"{root}/api/status", timeout=bound, **requests_verify_kwargs()
+        ).json()
+        quota_per_unit = float(
+            ((status.get("data") or {}) if isinstance(status, dict) else {}).get("quota_per_unit") or 0
+        )
+        if quota_per_unit <= 0:
+            return {}
+        base_price = 1_000_000.0 / quota_per_unit
+        payload = requests.get(
+            f"{root}/api/pricing", timeout=bound, **requests_verify_kwargs()
+        ).json()
+    except (requests.RequestException, TypeError, ValueError, AttributeError) as error:
+        log.warning("Failed to fetch openai-compatible pricing catalog: %s", error)
+        return {}
+
+    entries = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        return {}
+
+    pricing_dict: Dict[str, Tuple[Optional[float], ...]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("model_name") or "").strip()
+        if not name:
+            continue
+        try:
+            quota_type = int(entry.get("quota_type") if entry.get("quota_type") is not None else 0)
+            ratio = float(entry.get("model_ratio") or 0)
+            completion_ratio = float(entry.get("completion_ratio") or 0)
+        except (TypeError, ValueError):
+            continue
+        if quota_type != 0 or ratio <= 0 or completion_ratio <= 0:
+            continue  # per-image / free / malformed -> absent -> unknown
+        if ratio == _GATE_RATIO_SENTINEL:
+            continue  # the panel's default coefficient, never a price
+        input_price = ratio * base_price
+        pricing_dict[normalize_model_identity(f"openai-compatible::{name}")] = (
+            input_price,
+            input_price,
+            input_price,
+            ratio * completion_ratio * base_price,
+        )
+
+    # Dash-spelling aliases for configured routes the catalog does not name
+    # directly. Added only where the dash form is not already a row.
+    for key in [k for k in pricing_dict if k.startswith("openai-compatible/")]:
+        dashed = _gate_dash_alias(key)
+        if dashed != key and dashed not in pricing_dict:
+            pricing_dict[dashed] = pricing_dict[key]
+    return pricing_dict
 
 
 class _GenerationCostMixin:

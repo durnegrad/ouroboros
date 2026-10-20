@@ -769,7 +769,7 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
         _check_dispatch_fences(scope, root)
         global_limit = _global_limit(request)
         accounted = view.summary()["accounted_usd"]
-        if view.exceeds_limit(global_limit, bound):
+        if view.exceeds_limit(global_limit, bound, basis="hard"):
             raise BudgetExceeded(
                 f"global model budget exhausted: accounted=${accounted:.6f}, "
                 f"reservation={'unknown' if bound is None else f'${bound:.6f}'}, limit=${global_limit:.6f}",
@@ -782,7 +782,7 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
             root_limit = None if scope.root_limit_usd is None else max(0.0, float(scope.root_limit_usd))
             _stash_root_accounting(scope.root_task_id, root_accounted, root_limit)  # pre-append subtree sum
         if root_limit is not None:
-            if view.exceeds_limit(root_limit, bound, root_task_id=scope.root_task_id):
+            if view.exceeds_limit(root_limit, bound, root_task_id=scope.root_task_id, basis="hard"):
                 raise BudgetExceeded(
                     f"root model budget exhausted for {scope.root_task_id}: "
                     f"accounted=${root_accounted:.6f}, limit=${root_limit:.6f}",
@@ -1099,7 +1099,7 @@ def _transition(reservation: AttemptReservation, state: str, **fields: Any) -> D
                 ("global", _global_limit(limit_request), None),
                 ("root", scope.root_limit_usd, scope.root_task_id),
             ):
-                if limit is not None and view.exceeds_limit(limit, root_task_id=identity, dispatch=True):
+                if limit is not None and view.exceeds_limit(limit, root_task_id=identity, dispatch=True, basis="hard"):
                     raise BudgetExceeded(f"{axis} model budget changed before dispatch", limit_scope=axis,
                                          root_task_id=scope.root_task_id)
             from ouroboros.usage_admission import raise_group_refusal

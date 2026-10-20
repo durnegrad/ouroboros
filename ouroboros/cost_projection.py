@@ -34,6 +34,22 @@ COST_ALIAS_PAIRS = (
     ("accounted_upper_bound_usd_with_children", "cost_usd_with_children"),
 )
 
+# Where an amount CAME FROM. A provider-settled charge and a catalog-derived
+# estimate are both real numbers, and the owner's standing requirement is that
+# official and estimated accounting never look alike on any surface. Absence
+# means unknown provenance, never "settled".
+COST_BASIS_PROVIDER_SETTLED = "provider_settled"       # the provider's own cost field
+COST_BASIS_PROVIDER_LOGGED = "provider_logged_charge"  # the provider's own charge log
+COST_BASIS_CATALOG = "catalog_estimate"                # derived from a published tariff catalog
+COST_BASIS_UNKNOWN = "unknown"                         # no source answered
+
+COST_BASIS_VALUES = (
+    COST_BASIS_PROVIDER_SETTLED,
+    COST_BASIS_PROVIDER_LOGGED,
+    COST_BASIS_CATALOG,
+    COST_BASIS_UNKNOWN,
+)
+
 # The accounting OPENNESS / INTEGRITY markers that must ride BESIDE an amount
 # whenever the source carries them: an upper bound without them reads like a
 # receipt. ONE list, here — producers import it instead of hand-building a
